@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 
+from core.analyzers.query_parser import QueryAnalysisResult
+from core.models.claude_client import CustomJSONEncoder
+
 logger = logging.getLogger(__name__)
 
 
@@ -501,6 +504,86 @@ class InsightGenerator:
 
         return insights
 
+        # 在 InsightGenerator 类中
+    async def _create_product_opportunity_insight(self, high_performance_products: List[
+        Dict[str, Any]]) -> BusinessInsight:
+        """
+        (私有) 创建高表现产品的机会洞察。
+        high_performance_products: 表现优异的产品列表，每个产品是包含名称、购买次数等的字典。
+        """
+        insight_id = f"prod_opportunity_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        title = "明星产品表现强劲，存在增长新机会"
+
+        num_high_perf_products = len(high_performance_products)
+        product_names_examples = [p.get('产品名称', '未知产品') for p in high_performance_products[:2]]  # 列举1-2个例子
+
+        summary = f"发现 {num_high_perf_products} 款产品表现突出（例如：{', '.join(product_names_examples)}），购买次数多，用户反馈积极。这些明星产品是重要的增长引擎，并可能带来新的营销和交叉销售机会。"
+        detailed_analysis = f"{summary} 建议深入分析这些产品的成功因素，并考虑如何复制成功经验到其他产品线，或围绕这些产品设计新的增值服务。"
+        key_metrics = {
+            '高表现产品数量': num_high_perf_products,
+            '高表现产品示例': product_names_examples,
+            '平均购买次数（高表现产品）': sum(p.get('总购买次数', 0) for p in
+                                            high_performance_products) / num_high_perf_products if num_high_perf_products else 0
+        }
+        confidence = 0.85
+        priority = InsightPriority.HIGH  # 机会通常是高优先级
+
+        if self.claude_client and high_performance_products:
+            prompt = f"""
+            金融产品分析显示，以下产品表现优异，用户购买踊跃：
+            {json.dumps(high_performance_products[:3], ensure_ascii=False, indent=2, cls=CustomJSONEncoder)} # 最多3个产品示例给AI
+
+            请用中文分析：
+            1. 这些“明星产品”的成功可能归因于哪些因素？（例如：收益率、期限、市场定位、推广策略等）
+            2. 如何进一步利用这些产品的成功来带动整体业务增长？（例如：加大推广力度、设计关联产品、针对高价值用户进行精准营销、打包销售等）
+            3. 基于这些产品的特性，是否存在新的市场细分或用户群可以拓展？
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "对明星产品成功因素和潜在机会的详细中文分析。",
+            "growth_strategies_suggested": ["具体的增长策略建议1", "建议2"],
+            "target_actions": ["围绕这些产品的具体行动点1", "行动点2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"high_performance_products_sample": high_performance_products[:3]}
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for product opportunity insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for product opportunity insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.OPPORTUNITY_IDENTIFICATION,
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"high_performance_products": high_performance_products},
+            confidence_score=confidence,
+            recommended_actions=[],
+            # 由 _generate_actionable_recommendations (特别是 _generate_opportunity_capture_actions) 填充
+            expected_impact="通过聚焦和推广高表现产品，带动整体销售额和用户参与度的提升。",
+            implementation_difficulty="中等",
+            data_sources=["/api/sta/product"],  # 主要数据来源
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="未来1-3个月重点推广"
+        )
+
     async def _create_product_utilization_insight(self, low_utilization_products: List[Dict]) -> BusinessInsight:
         """创建产品利用率洞察"""
 
@@ -741,6 +824,80 @@ class InsightGenerator:
 
         return insights
 
+    async def _create_business_continuity_risk_insight(self, volatility_metric: float,
+                                                       daily_trend_data: Dict[str, Any]) -> BusinessInsight:
+        """
+        (私有) 创建业务连续性风险洞察（例如，关键指标波动过大）。
+        volatility_metric: 一个量化波动性的指标值。
+        daily_trend_data: 相关的日趋势数据作为上下文。
+        """
+        insight_id = f"biz_continuity_risk_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        title = "业务关键指标波动异常，关注连续性风险"
+        summary = f"监测到近期业务关键指标（例如资金、用户活跃度）出现显著波动（波动性指标: {volatility_metric:.2f}），可能影响业务的稳定性和连续性。"
+        detailed_analysis = f"{summary} 高波动性可能预示着市场环境变化、内部运营问题或突发事件影响。建议深入分析波动来源，评估其对核心业务流程的影响，并制定应对预案。"
+        key_metrics = {
+            '观测到的波动性指标': volatility_metric,
+            '风险等级评估': '高' if volatility_metric > 0.25 else '中'  # 示例阈值
+        }
+        confidence = 0.70 + (0.15 if volatility_metric > 0.25 else 0)
+        priority = InsightPriority.HIGH if volatility_metric > 0.25 else InsightPriority.MEDIUM
+
+        if self.claude_client:
+            prompt = f"""
+            公司业务数据显示关键指标存在较高波动性：
+            - 量化的波动性指标值为: {volatility_metric:.3f} (例如，高于0.15或0.2即为显著)
+            - 相关日趋势数据摘要: {json.dumps(daily_trend_data, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)}
+
+            请用中文分析：
+            1. 这种高波动性对业务连续性可能造成的具体风险是什么？（例如：现金流规划困难、用户信任度下降、运营计划打乱等）
+            2. 建议从哪些方面调查波动产生的原因？
+            3. 为应对此类波动，可以考虑哪些风险管理或业务调整措施？
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "对波动性风险的详细中文分析。",
+            "potential_continuity_risks": ["具体连续性风险1", "风险2"],
+            "risk_management_suggestions": ["风险管理建议1", "建议2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"volatility_data": daily_trend_data}
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for business continuity risk insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for business continuity risk insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.RISK_WARNING,
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"daily_trends_snapshot": daily_trend_data, "calculated_volatility": volatility_metric},
+            confidence_score=confidence,
+            recommended_actions=[],  # 由 _generate_actionable_recommendations 填充
+            expected_impact="通过识别和管理波动性，增强业务韧性，保障运营稳定。",
+            implementation_difficulty="中等",
+            data_sources=[f"{api_name}" for api_name in daily_trend_data.get("api_source_names", ["/api/sta/day"])],
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="需持续监控，1-2周内制定应对策略"
+        )
+
     async def _create_liquidity_critical_risk_insight(self, liquidity_days: float,
                                                       total_balance: float, daily_outflow: float) -> BusinessInsight:
         """创建流动性严重风险洞察"""
@@ -823,6 +980,827 @@ class InsightGenerator:
         except Exception as e:
             logger.error(f"行动建议生成失败: {str(e)}")
             return []
+
+    async def _generate_financial_optimization_actions(self, insight: BusinessInsight,
+                                                       processed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        (私有) 为财务健康相关的洞察生成具体的财务优化行动建议。
+        """
+        actions: List[Dict[str, Any]] = []
+        action_prefix = f"fin_opt_act_{insight.insight_id[-6:]}"  # 基于洞察ID生成唯一前缀
+
+        if not self.claude_client:
+            logger.warning("ClaudeClient not available for generating financial optimization actions.")
+            # 提供一些基于规则的通用建议
+            if insight.priority in [InsightPriority.CRITICAL, InsightPriority.HIGH]:
+                actions.append({
+                    'action_id': f"{action_prefix}_review_cashflow", 'title': "紧急审视现金流",
+                    'description': "立即对当前现金流状况进行全面审查，识别主要出金点和潜在风险。",
+                    'action_type': ActionType.IMMEDIATE_ACTION.value, 'priority': InsightPriority.HIGH.value
+                })
+            actions.append({
+                'action_id': f"{action_prefix}_monitor_key_ratios", 'title': "监控关键财务比率",
+                'description': "持续监控如流动比率、速动比率、出入金比等关键财务健康指标。",
+                'action_type': ActionType.MONITORING.value, 'priority': InsightPriority.MEDIUM.value
+            })
+            return actions
+
+        # 使用AI生成更具体的建议
+        # insight.summary 和 insight.detailed_analysis 已经包含了AI对财务状况的分析
+        # insight.key_metrics 包含了相关数据
+
+        prompt_context = {
+            "insight_title": insight.title,
+            "insight_summary": insight.summary,
+            "insight_priority": insight.priority.value,
+            "key_financial_metrics": insight.key_metrics,  # 包含关键数据
+            "current_financial_analysis": insight.detailed_analysis  # AI之前的分析
+        }
+
+        prompt = f"""
+        您是一位经验丰富的首席财务官(CFO)。以下是一项关于公司财务状况的业务洞察：
+        洞察标题: "{insight.title}"
+        洞察摘要: "{insight.summary}"
+        优先级: {insight.priority.value}
+        关键相关财务指标: {json.dumps(insight.key_metrics, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)}
+        系统生成的详细分析:
+        ---
+        {insight.detailed_analysis}
+        ---
+
+        基于以上洞察和分析，请提出 2-3 条具体的、可操作的财务优化行动建议。
+        对于每条建议，请明确：
+        1.  `action_title`: 建议的简洁标题 (例如：“优化短期债务结构”)
+        2.  `action_description`: 建议的详细描述和执行要点。
+        3.  `action_type`: 从以下选择：{', '.join([e.value for e in ActionType])} (例如："short_term_plan")
+        4.  `timeline_suggestion`: 建议的执行时间框架 (例如：“1周内启动”，“持续进行”)
+        5.  `expected_outcome_summary`: 执行此建议预期的主要成果。
+
+        请以JSON数组的格式返回这些建议，每个元素是一个包含上述键的字典。例如：
+        [
+            {{
+                "action_title": "...",
+                "action_description": "...",
+                "action_type": "...",
+                "timeline_suggestion": "...",
+                "expected_outcome_summary": "..."
+            }}
+        ]
+        如果洞察表明财务状况良好，建议可以是“维持并监控”或“探索新的投资机会”。
+        如果洞察表明存在风险，建议应侧重于风险缓解和控制。
+        """
+        try:
+            ai_response = await self.claude_client.analyze_complex_query(query=prompt, context=prompt_context)
+            if ai_response and ai_response.get('success'):
+                response_content = ai_response.get('analysis', ai_response.get('response'))
+                if isinstance(response_content, str):
+                    try:
+                        response_content = json.loads(response_content)  # 期望返回JSON列表
+                    except json.JSONDecodeError:
+                        logger.error(f"AI response for financial actions is not valid JSON: {response_content[:200]}")
+                        # 可以尝试从文本中解析，或返回通用建议
+
+                if isinstance(response_content, list):
+                    for idx, action_data in enumerate(response_content):
+                        if isinstance(action_data, dict):
+                            actions.append({
+                                'action_id': f"{action_prefix}_{idx}",
+                                'action_type': ActionType(
+                                    action_data.get('action_type', ActionType.MEDIUM_TERM_PLAN.value)).value,
+                                'title': action_data.get('action_title', f"财务优化建议 {idx + 1}"),
+                                'description': action_data.get('action_description', "根据AI分析的具体建议。"),
+                                'priority': insight.priority.value,  # 继承洞察的优先级或AI重新评估
+                                'timeline': action_data.get('timeline_suggestion', "根据实际情况制定"),
+                                'responsible_party': "财务部门/管理层",  # 通用负责人
+                                'required_resources': ["财务数据分析能力", "决策权"],
+                                'success_metrics': [f"{action_data.get('expected_outcome_summary', '财务指标改善')}"],
+                                'expected_outcome': action_data.get('expected_outcome_summary', "改善财务健康状况"),
+                                'potential_risks': ["市场变化可能影响效果"]
+                            })
+                        else:
+                            logger.warning(f"AI returned non-dict item in actions list: {action_data}")
+            else:
+                logger.warning(
+                    f"AI call for financial optimization actions failed or no success: {ai_response.get('error') if ai_response else 'N/A'}")
+        except Exception as e:
+            logger.error(f"Error generating financial optimization actions with AI: {e}")
+
+        # 如果AI失败或没有生成具体行动，补充通用建议
+        if not actions:
+            actions.append({
+                'action_id': f"{action_prefix}_default_monitor", 'title': "持续监控财务指标",
+                'description': "定期回顾核心财务报表和关键比率，确保财务健康。",
+                'action_type': ActionType.MONITORING.value, 'priority': InsightPriority.MEDIUM.value,
+                'timeline': "持续进行", 'responsible_party': "财务团队",
+                'expected_outcome': "及时发现财务风险和机会"
+            })
+        return actions
+    async def _create_financial_opportunity_insight(self, outflow_ratio: float, net_flow: float,
+                                                    system_data: Dict[str, Any]) -> BusinessInsight:
+        """
+        (私有) 创建积极财务状况下的机会洞察。
+        例如：现金流充裕，出金占比低。
+        """
+        insight_id = f"fin_opportunity_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        title = "财务状况健康，现金流充裕"
+        summary = f"当前出金与入金比例为{outflow_ratio:.1%}，净现金流为 ¥{net_flow:,.0f}，显示公司资金状况良好，存在进一步发展的机会。"
+        detailed_analysis = summary  # 初始分析与摘要相同，可由AI丰富
+        key_metrics = {
+            '出金入金比': outflow_ratio,
+            '净现金流': net_flow,
+            '总余额': float(system_data.get('总余额', 0)),
+            '评估': '健康且有机会'
+        }
+        confidence = 0.85
+        priority = InsightPriority.MEDIUM  # 通常机会是中高优先级
+
+        if self.claude_client:
+            prompt = f"""
+            当前公司财务数据显示：
+            - 出金与入金比例: {outflow_ratio:.2%} (低于50%被认为是健康的)
+            - 净现金流: ¥{net_flow:,.0f}
+            - 总余额: ¥{float(system_data.get('总余额', 0)):,.0f}
+
+            这是一个积极的财务信号。请基于此信息，用中文分析：
+            1. 这种良好财务状况可能带来的具体业务机会（例如：新产品投资、市场扩张、股东分红、债务偿还等）。
+            2. 如何利用当前充裕的现金流来进一步提升公司价值或降低潜在风险？
+            3. 对这种机会的简要评估（例如，机会窗口、潜在回报）。
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "详细的中文分析文本。",
+            "identified_opportunities": ["机会点1的描述", "机会点2的描述"],
+            "strategic_suggestions": ["利用此机会的策略建议1", "建议2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"financial_data": system_data}
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})  # 假设 'analysis' 包含所需内容
+                    if isinstance(analysis_content, str):  # 有时候AI可能直接返回文本
+                        try:
+                            analysis_content = json.loads(analysis_content)  # 尝试解析
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        # Opportunity insights might be directly part of the text, or structured
+                        # For now, we'll assume the detailed_analysis from AI is comprehensive.
+                        # Recommendations will be generated separately.
+                        confidence = analysis_content.get('confidence', confidence)  # AI可能给出置信度
+                else:
+                    logger.warning(
+                        f"AI call for financial opportunity insight failed or returned no success: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for financial opportunity insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.OPPORTUNITY_IDENTIFICATION,  # 更具体的类型
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"system_snapshot": system_data},
+            confidence_score=confidence,
+            recommended_actions=[],  # 将由 _generate_actionable_recommendations 填充
+            expected_impact="通过有效利用现有资金优势，可能实现业务增长或风险降低。",
+            implementation_difficulty="中等",  # 取决于具体机会
+            data_sources=[f"{api_name}" for api_name in system_data.get("api_source_names", ["/api/sta/system"])],
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="未来1-3个月"
+        )
+
+    async def _create_growth_concern_insight(self, avg_registrations: float, growth_rate: float,
+                                             daily_data: Dict[str, Any]) -> BusinessInsight:
+        """
+        (私有) 创建用户增长缓慢或未达标的关注点洞察。
+        """
+        insight_id = f"user_growth_concern_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        rules = self.business_rules['user_growth']
+        title = "用户增长速度需关注和提升"
+        summary = f"日均新增用户约{avg_registrations:.0f}人，增长率{growth_rate:.1%}，可能低于预期（目标: {rules.get('healthy_daily_growth', 50)}人/天）。建议分析原因并采取措施。"
+        detailed_analysis = summary
+        key_metrics = {
+            '日均新增注册': avg_registrations,
+            '用户增长率': growth_rate,
+            '目标日新增': rules.get('healthy_daily_growth', 50),
+            '日新增缺口': rules.get('healthy_daily_growth', 50) - avg_registrations
+        }
+        confidence = 0.75  # 基于规则的判断，但原因分析需要AI
+        priority = InsightPriority.MEDIUM
+
+        if self.claude_client:
+            prompt = f"""
+            当前用户增长数据显示：
+            - 日均新增用户: {avg_registrations:.0f} 人
+            - 近期用户增长率: {growth_rate:.1%}
+            - 业务期望的日新增用户数约为: {rules.get('healthy_daily_growth', 50)} 人
+
+            该增长数据可能未达业务预期。请用中文分析：
+            1. 用户增长缓慢或未达预期的可能原因（例如：市场推广不足、产品吸引力下降、用户体验问题、竞争对手影响等）。
+            2. 针对这些可能原因，可以从哪些方面入手调查和分析？
+            3. 初步提出1-2个可以考虑的提升用户增长的策略方向。
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "详细的中文分析，包括可能原因和调查方向。",
+            "preliminary_strategies": ["初步策略方向1", "初步策略方向2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"daily_user_data": daily_data}  # daily_data 包含 avg_daily_registrations, user_growth_rate 等
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        # Recommendations will be generated separately if needed
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for user growth concern insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for user growth concern insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.USER_GROWTH_INSIGHT,
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"daily_user_metrics": daily_data},
+            confidence_score=confidence,
+            recommended_actions=[],
+            expected_impact="通过针对性措施提升用户增长速率，扩大用户基础。",
+            implementation_difficulty="中至高",
+            data_sources=[f"{api_name}" for api_name in
+                          daily_data.get("api_source_names", ["/api/sta/day", "/api/sta/user_daily"])],
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="未来1个月重点关注"
+        )
+
+    async def _create_liquidity_warning_insight(self, sustainability_days: float, total_balance: float,
+                                                daily_outflow_avg: float) -> BusinessInsight:
+        """
+        (私有) 创建流动性风险预警洞察。
+        """
+        insight_id = f"liquidity_warn_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        rules = self.business_rules['financial_health']
+        title = "流动性风险预警：资金短期支撑能力需关注"
+        summary = f"按当前日均出金约 ¥{daily_outflow_avg:,.0f} 计算，现有总余额 ¥{total_balance:,.0f} 预计可支撑 {sustainability_days:.1f} 天，低于 {rules.get('liquidity_warning_days', 30)} 天的警戒线。"
+        detailed_analysis = summary
+        key_metrics = {
+            '资金可支撑天数': sustainability_days,
+            '总余额': total_balance,
+            '日均出金': daily_outflow_avg,
+            '警戒线天数': rules.get('liquidity_warning_days', 30)
+        }
+        # 根据天数差距设定优先级和置信度
+        priority = InsightPriority.HIGH
+        confidence = 0.80
+        if sustainability_days < (rules.get('liquidity_warning_days', 30) / 2):  # 例如少于15天
+            priority = InsightPriority.CRITICAL
+            confidence = 0.90
+        elif sustainability_days < rules.get('liquidity_warning_days', 30) * 0.75:  # 例如少于22.5天
+            priority = InsightPriority.HIGH
+            confidence = 0.85
+
+        if self.claude_client:
+            prompt = f"""
+            公司财务数据显示存在流动性风险：
+            - 当前总余额: ¥{total_balance:,.0f}
+            - 近期日均出金: ¥{daily_outflow_avg:,.0f}
+            - 计算出的资金可支撑天数: {sustainability_days:.1f} 天
+            - 业务设定的流动性预警天数为: {rules.get('liquidity_warning_days', 30)} 天
+
+            当前支撑天数低于警戒线。请用中文分析：
+            1. 此流动性风险的潜在原因（例如：近期大额集中出金、入金减少、投资周期错配等）。
+            2. 此风险可能导致的短期和中期业务影响。
+            3. 针对此情况，可以立即采取的缓解措施，以及中长期改善流动性管理的建议。
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "详细的中文风险分析及原因推测。",
+            "potential_impacts_text": "潜在影响的描述。",
+            "mitigation_suggestions": ["缓解措施建议1", "建议2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"balance_data": total_balance, "outflow_data": daily_outflow_avg}
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass  # Keep as string if not valid JSON
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        # You might want to add potential_impacts_text to detailed_analysis or store separately
+                        impact_text = analysis_content.get('potential_impacts_text', '')
+                        if impact_text:
+                            detailed_analysis += f"\n\n潜在影响：{impact_text}"
+                        # Recommendations will be handled by _generate_actionable_recommendations
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for liquidity warning insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for liquidity warning insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.RISK_WARNING,
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"total_balance": total_balance, "daily_outflow_avg": daily_outflow_avg,
+                             "sustainability_days": sustainability_days},
+            confidence_score=confidence,
+            recommended_actions=[],  # 由 _generate_actionable_recommendations 填充
+            expected_impact="及时应对可避免资金链紧张，保障业务正常运营。",
+            implementation_difficulty="中等至高，取决于具体措施",
+            data_sources=["/api/sta/system", "/api/sta/day"],  # 假设数据来源
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="立即关注，1周内采取初步措施"
+        )
+
+    async def _generate_user_growth_actions(self, insight: BusinessInsight,
+                                            processed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        (私有) 为用户增长相关的洞察生成具体的行动建议。
+        """
+        actions: List[Dict[str, Any]] = []
+        action_prefix = f"user_growth_act_{insight.insight_id[-6:]}"
+
+        if not self.claude_client:
+            logger.warning("ClaudeClient not available for generating user growth actions.")
+            actions.append({
+                'action_id': f"{action_prefix}_analyze_channels", 'title': "分析获客渠道",
+                'description': "评估不同用户获取渠道的成本和效益，优化投入。",
+                'action_type': ActionType.MEDIUM_TERM_PLAN.value, 'priority': InsightPriority.MEDIUM.value
+            })
+            return actions
+
+        prompt_context = {
+            "insight_title": insight.title,
+            "insight_summary": insight.summary,
+            "insight_priority": insight.priority.value,
+            "key_user_metrics": insight.key_metrics,  # 例如：日新增、增长率、活跃度等
+            "current_user_analysis": insight.detailed_analysis
+        }
+
+        prompt = f"""
+        您是一位经验丰富的用户增长策略师。以下是一项关于公司用户增长状况的业务洞察：
+        洞察标题: "{insight.title}"
+        洞察摘要: "{insight.summary}"
+        优先级: {insight.priority.value}
+        关键相关用户指标: {json.dumps(insight.key_metrics, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)}
+        系统生成的详细分析:
+        ---
+        {insight.detailed_analysis}
+        ---
+
+        基于以上洞察（特别是如果增长未达预期或存在机会），请提出 2-3 条具体的、可操作的用以提升用户增长或用户活跃度的行动建议。
+        对于每条建议，请明确：
+        1.  `action_title`: 建议的简洁标题 (例如：“启动新用户推荐奖励计划”)
+        2.  `action_description`: 建议的详细描述和执行要点。
+        3.  `action_type`: 从以下选择：{', '.join([e.value for e in ActionType])} (例如："short_term_plan")
+        4.  `target_metric_to_improve`: 此建议主要针对哪个用户指标的提升 (例如：“日新增用户数”、“用户活跃率”)
+        5.  `success_criteria`: 如何衡量此建议的成功 (例如：“日新增用户提升20%”)
+
+        请以JSON数组的格式返回这些建议，每个元素是一个包含上述键的字典。
+        如果洞察表明用户增长良好，建议可以是“维持现有策略并探索新渠道”或“提升高价值用户转化”。
+        """
+        try:
+            ai_response = await self.claude_client.analyze_complex_query(query=prompt, context=prompt_context)
+            if ai_response and ai_response.get('success'):
+                response_content = ai_response.get('analysis', ai_response.get('response'))
+                if isinstance(response_content, str):
+                    try:
+                        response_content = json.loads(response_content)
+                    except json.JSONDecodeError:
+                        logger.error(f"AI response for user growth actions is not valid JSON: {response_content[:200]}")
+
+                if isinstance(response_content, list):
+                    for idx, action_data in enumerate(response_content):
+                        if isinstance(action_data, dict):
+                            actions.append({
+                                'action_id': f"{action_prefix}_{idx}",
+                                'action_type': ActionType(
+                                    action_data.get('action_type', ActionType.MEDIUM_TERM_PLAN.value)).value,
+                                'title': action_data.get('action_title', f"用户增长建议 {idx + 1}"),
+                                'description': action_data.get('action_description', "根据AI分析的具体用户增长建议。"),
+                                'priority': insight.priority.value,
+                                'timeline': action_data.get('timeline_suggestion', "根据目标制定"),  # AI 可能也返回 timeline
+                                'responsible_party': "市场部门/运营部门",
+                                'required_resources': ["营销预算", "运营人力"],
+                                'success_metrics': [action_data.get('success_criteria',
+                                                                    f"提升目标指标 {action_data.get('target_metric_to_improve', 'N/A')}")],
+                                'expected_outcome': f"提升 {action_data.get('target_metric_to_improve', '用户增长相关')} 指标",
+                                'potential_risks': ["市场竞争激烈", "用户偏好变化"]
+                            })
+            else:
+                logger.warning(
+                    f"AI call for user growth actions failed or no success: {ai_response.get('error') if ai_response else 'N/A'}")
+        except Exception as e:
+            logger.error(f"Error generating user growth actions with AI: {e}")
+
+        if not actions:
+            actions.append({
+                'action_id': f"{action_prefix}_default_engagement", 'title': "提升用户活跃和留存",
+                'description': "分析用户行为数据，优化产品体验，策划用户互动活动以提高用户粘性。",
+                'action_type': ActionType.MEDIUM_TERM_PLAN.value, 'priority': InsightPriority.MEDIUM.value,
+                'timeline': "持续优化", 'responsible_party': "产品/运营团队",
+                'expected_outcome': "提高用户活跃度和留存率"
+            })
+        return actions
+
+    async def _create_user_growth_opportunity_insight(self, avg_registrations: float, growth_rate: float,
+                                                      daily_data: Dict[str, Any]) -> BusinessInsight:
+        """
+        (私有) 创建用户增长良好的机会洞察。
+        """
+        insight_id = f"user_growth_opp_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        title = "用户增长势头强劲，可进一步扩大优势"
+        summary = f"近期用户增长表现出色，日均新增用户达到约 {avg_registrations:.0f} 人，增长率高达 {growth_rate:.1%}。这是一个积极的信号，表明当前获客策略有效，并可能存在进一步扩大市场份额的机会。"
+        detailed_analysis = f"{summary} 建议分析当前高效的获客渠道和用户画像，加大投入，并探索如何提高新用户的留存和转化。"
+        key_metrics = {
+            '日均新增注册': avg_registrations,
+            '用户增长率': growth_rate,
+            '增长势头评估': '强劲'
+        }
+        confidence = 0.90  # 基于良好数据，置信度较高
+        priority = InsightPriority.HIGH
+
+        if self.claude_client:
+            prompt = f"""
+            公司用户增长数据显示出强劲势头：
+            - 日均新增用户: {avg_registrations:.0f} 人
+            - 近期用户增长率: {growth_rate:.1%}
+
+            这是一个非常积极的信号。请用中文分析：
+            1. 这种快速增长可能的主要驱动因素是什么？（例如：成功的市场活动、产品特性吸引、口碑传播等）
+            2. 如何保持并进一步加速这种增长势头？有哪些可以放大的策略？
+            3. 在快速增长的同时，需要注意哪些潜在的挑战或风险？（例如：服务承载能力、新用户质量、留存问题等）
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "对增长驱动因素和持续增长策略的详细中文分析。",
+            "acceleration_strategies": ["加速增长策略1", "策略2"],
+            "potential_challenges": ["潜在挑战1", "挑战2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"user_growth_data": daily_data}  # daily_data 包含相关指标
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for user growth opportunity insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for user growth opportunity insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.OPPORTUNITY_IDENTIFICATION,  # 也可以是 USER_GROWTH_INSIGHT 但更偏机会
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"daily_user_metrics_snapshot": daily_data},
+            confidence_score=confidence,
+            recommended_actions=[],  # 由 _generate_actionable_recommendations (特别是 _generate_user_growth_actions) 填充
+            expected_impact="巩固并扩大用户增长优势，快速提升市场占有率。",
+            implementation_difficulty="中等",
+            data_sources=[f"{api_name}" for api_name in
+                          daily_data.get("api_source_names", ["/api/sta/day", "/api/sta/user_daily"])],
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="未来1-3个月抓住增长窗口期"
+        )
+
+
+
+    async def _create_user_activation_insight(self, activation_rate: float,
+                                              user_data_context: Dict[str, Any]) -> BusinessInsight:
+        """
+        (私有) 创建用户激活率偏低的改进洞察。
+        activation_rate: 计算得出的用户激活率 (例如：活跃用户/总注册用户)。
+        user_data_context: 相关的用户数据作为上下文。
+        """
+        insight_id = f"user_activation_concern_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        rules = self.business_rules['user_growth']  # 假设激活率相关的规则也在这里
+        target_activation_rate = rules.get('activation_target',
+                                           rules.get('retention_warning_threshold', 0.7))  # 使用一个激活目标或留存阈值
+
+        title = "用户激活效率有提升空间"
+        summary = f"当前用户激活率约为 {activation_rate:.1%}，可能低于业务目标（例如 {target_activation_rate:.0%}）。建议优化新用户引导流程和早期用户体验，以提高激活转化。"
+        detailed_analysis = f"{summary} 低激活率可能意味着新用户在注册后未能充分体验产品价值，导致流失。需要关注新用户路径，识别流失节点。"
+        key_metrics = {
+            '用户激活率': activation_rate,
+            '目标激活率': target_activation_rate,
+            '激活率差距': target_activation_rate - activation_rate,
+        }
+        confidence = 0.78
+        priority = InsightPriority.MEDIUM
+
+        if self.claude_client:
+            prompt = f"""
+            公司用户数据显示，当前用户激活率（例如：活跃用户/注册用户 或 首次购买用户/注册用户）约为 {activation_rate:.1%}，
+            而业务目标通常期望达到 {target_activation_rate:.0%} 或更高。
+
+            请用中文分析：
+            1. 用户激活率偏低可能存在哪些常见原因？（例如：新用户引导复杂、产品价值未被快速感知、早期体验不佳、推送消息不当等）
+            2. 为了提升用户激活率，可以从哪些方面着手改进？（例如：优化注册后引导、提供新手任务或奖励、个性化内容推荐、优化首次使用体验等）
+            3. 建议如何通过数据分析来定位激活流程中的具体瓶颈？
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "对激活率偏低原因和改进方向的详细中文分析。",
+            "activation_improvement_strategies": ["提升激活率策略1", "策略2"],
+            "bottleneck_analysis_suggestions": ["定位瓶颈的数据分析方法1", "方法2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"user_activation_data": user_data_context}  # user_data_context 应包含计算激活率的原始数据
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for user activation insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for user activation insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.USER_GROWTH_INSIGHT,  # 也可以是 OPERATIONAL_EFFICIENCY
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"user_conversion_metrics": user_data_context},
+            confidence_score=confidence,
+            recommended_actions=[],  # 由 _generate_actionable_recommendations (特别是 _generate_user_growth_actions) 填充
+            expected_impact="提高新用户向活跃/付费用户的转化，提升用户生命周期价值。",
+            implementation_difficulty="中等",
+            data_sources=[f"{api_name}" for api_name in
+                          user_data_context.get("api_source_names", ["/api/sta/user_daily", "/api/sta/user"])],
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="未来1-2个月内优化激活流程"
+        )
+    async def _generate_generic_actions(self, insight: BusinessInsight,
+                                        processed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        (私有) 为通用类型的洞察生成普适性的行动建议。
+        """
+        actions: List[Dict[str, Any]] = []
+        action_prefix = f"generic_act_{insight.insight_id[-6:]}"
+
+        logger.info(f"Generating generic actions for insight: {insight.title} (Type: {insight.insight_type.value})")
+
+        if not self.claude_client:
+            logger.warning("ClaudeClient not available for generating generic actions.")
+            actions.append({
+                'action_id': f"{action_prefix}_follow_up", 'title': "跟进此项洞察",
+                'description': f"针对洞察 '{insight.title}' 进行进一步分析，并根据具体情况制定后续计划。",
+                'action_type': ActionType.SHORT_TERM_PLAN.value, 'priority': insight.priority.value
+            })
+            return actions
+
+        prompt_context = {
+            "insight_title": insight.title,
+            "insight_summary": insight.summary,
+            "insight_type": insight.insight_type.value,
+            "insight_priority": insight.priority.value,
+            "key_insight_metrics": insight.key_metrics,
+            "detailed_insight_analysis": insight.detailed_analysis
+        }
+
+        prompt = f"""
+        您是一位经验丰富的业务策略顾问。以下是一项业务洞察：
+        洞察标题: "{insight.title}"
+        洞察类型: {insight.insight_type.value}
+        洞察摘要: "{insight.summary}"
+        优先级: {insight.priority.value}
+        支持该洞察的关键指标: {json.dumps(insight.key_metrics, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)}
+        系统对该洞察的详细分析内容:
+        ---
+        {insight.detailed_analysis}
+        ---
+
+        基于以上信息，请为这项洞察提出 1-2 条最相关的、具有普遍适用性的行动建议。
+        对于每条建议，请提供：
+        1.  `action_title`: 建议的简洁标题。
+        2.  `action_description`: 建议的详细描述。
+        3.  `action_type`: （例如："monitoring", "short_term_plan", "medium_term_plan"）。
+        4.  `general_expected_outcome`: 执行此建议通常期望达到什么类型的结果。
+
+        请以JSON数组的格式返回这些建议。
+        """
+        try:
+            ai_response = await self.claude_client.analyze_complex_query(query=prompt, context=prompt_context)
+            if ai_response and ai_response.get('success'):
+                response_content = ai_response.get('analysis', ai_response.get('response'))
+                if isinstance(response_content, str):
+                    try:
+                        response_content = json.loads(response_content)
+                    except json.JSONDecodeError:
+                        logger.error(f"AI response for generic actions is not valid JSON: {response_content[:200]}")
+
+                if isinstance(response_content, list):
+                    for idx, action_data in enumerate(response_content):
+                        if isinstance(action_data, dict):
+                            actions.append({
+                                'action_id': f"{action_prefix}_{idx}",
+                                'action_type': ActionType(
+                                    action_data.get('action_type', ActionType.MONITORING.value)).value,
+                                'title': action_data.get('action_title', f"通用建议 {idx + 1}"),
+                                'description': action_data.get('action_description', "根据AI分析的通用建议。"),
+                                'priority': insight.priority.value,  # 继承洞察优先级
+                                'timeline': "根据业务节奏安排",
+                                'responsible_party': "相关业务团队",
+                                'required_resources': ["业务分析", "团队讨论"],
+                                'success_metrics': [action_data.get('general_expected_outcome', "相关指标改善")],
+                                'expected_outcome': action_data.get('general_expected_outcome',
+                                                                    "业务流程或指标得到优化"),
+                                'potential_risks': ["执行不到位可能影响效果"]
+                            })
+            else:
+                logger.warning(
+                    f"AI call for generic actions failed or no success: {ai_response.get('error') if ai_response else 'N/A'}")
+        except Exception as e:
+            logger.error(f"Error generating generic actions with AI: {e}")
+
+        if not actions:  # 如果AI调用失败或未返回有效内容
+            actions.append({
+                'action_id': f"{action_prefix}_default_discuss", 'title': "讨论并制定行动计划",
+                'description': f"针对洞察 '{insight.title}' ({insight.summary[:50]}...)，组织相关团队进行讨论，评估其影响并制定具体的后续行动计划。",
+                'action_type': ActionType.SHORT_TERM_PLAN.value, 'priority': insight.priority.value,
+                'timeline': "1周内", 'responsible_party': "相关负责人",
+                'expected_outcome': "明确此洞察的应对策略"
+            })
+        return actions
+    def _extract_key_metrics_for_insight(self, analysis_result_item: Any, context_description: str = "") -> Dict[
+        str, Any]:
+        """
+        (私有辅助) 从单个分析结果项中提取关键指标，用于特定洞察。
+        这个方法与 Orchestrator 中的 _extract_key_metrics 功能类似但作用域更小。
+        """
+        metrics: Dict[str, Any] = {}
+        if not analysis_result_item:
+            return metrics
+
+        data_to_search: Optional[Dict[str, Any]] = None
+        if hasattr(analysis_result_item, 'to_dict') and callable(analysis_result_item.to_dict):
+            data_to_search = analysis_result_item.to_dict()
+        elif hasattr(analysis_result_item, '__dict__'):
+            data_to_search = analysis_result_item.__dict__
+        elif isinstance(analysis_result_item, dict):
+            data_to_search = analysis_result_item
+
+        if not data_to_search:
+            return metrics
+
+        # 尝试从常见的指标容器键中提取
+        metric_container_keys = ['key_metrics', 'metrics', 'main_prediction', 'data']
+        for container_key in metric_container_keys:
+            if container_key in data_to_search and isinstance(data_to_search[container_key], dict):
+                for k, v in data_to_search[container_key].items():
+                    # 简单提取，不加复杂前缀，因为这是针对单个洞察的上下文
+                    # 可以根据 context_description 进一步筛选相关指标
+                    if isinstance(v, (str, int, float, bool)):  # 只取简单类型作为指标值
+                        metrics[k] = v
+                if metrics: break  # 如果在一个容器中找到，可能就够了
+
+        logger.debug(f"Extracted {len(metrics)} key metrics for insight context '{context_description}'.")
+        return metrics
+
+    async def _create_data_anomaly_risk_insight(self, anomalies: List[Dict[str, Any]]) -> BusinessInsight:
+        """
+        (私有) 创建数据异常风险洞察。
+        anomalies: 通常来自 FinancialDataAnalyzer.detect_anomalies 的结果列表。
+                  每个 anomaly 字典应包含 'metric', 'date', 'actual_value', 'expected_value', 'severity' 等。
+        """
+        insight_id = f"data_anomaly_risk_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        title = "数据异常波动风险提示"
+
+        # 总结异常情况
+        num_anomalies = len(anomalies)
+        critical_anomalies_count = sum(
+            1 for anom in anomalies if anom.get('severity', '').lower() in ['high', 'critical'])
+        affected_metrics = list(set(anom.get('metric', '未知指标') for anom in anomalies))
+
+        summary = f"检测到 {num_anomalies} 个数据点存在异常波动，其中 {critical_anomalies_count} 个为高风险或严重异常。主要影响指标包括：{', '.join(affected_metrics[:3])}。"
+        detailed_analysis = f"{summary} 需要进一步调查这些异常数据点产生的原因，评估其对业务决策的潜在影响。"
+        key_metrics = {
+            '检测到的异常总数': num_anomalies,
+            '高风险/严重异常数': critical_anomalies_count,
+            '受影响指标示例': affected_metrics[:3]
+        }
+        confidence = 0.80 + (0.10 if critical_anomalies_count > 0 else 0)  # 如果有严重异常，置信度更高
+        priority = InsightPriority.HIGH if critical_anomalies_count > 0 else InsightPriority.MEDIUM
+
+        if self.claude_client and anomalies:
+            # 选取前几个最严重的异常进行分析
+            anomalies_for_ai = sorted(anomalies, key=lambda x: (
+            x.get('severity', 'low') == 'critical', x.get('severity', 'low') == 'high',
+            -float(x.get('deviation_score', 0))), reverse=True)[:3]
+
+            prompt = f"""
+            金融数据分析系统检测到以下数据异常点：
+            {json.dumps(anomalies_for_ai, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)}
+
+            请用中文分析：
+            1. 这些异常数据可能共同指向的潜在业务问题是什么？（例如：数据采集错误、欺诈行为、市场突变、系统故障等）
+            2. 基于这些异常，最需要关注的风险点是什么？
+            3. 为了确认异常原因并评估影响，建议立即采取哪些调查步骤？
+            4. 简要说明这些异常如果属实，可能对业务决策带来哪些误导。
+
+            请提供一个包含以下键的JSON对象：
+            "detailed_analysis_text": "对异常的综合分析和潜在原因推测。",
+            "primary_risks_identified": ["主要风险点1", "风险点2"],
+            "investigation_steps_suggested": ["调查步骤1", "步骤2"]
+            """
+            try:
+                ai_response = await self.claude_client.analyze_complex_query(
+                    query=prompt,
+                    context={"detected_anomalies_sample": anomalies_for_ai}
+                )
+                if ai_response and ai_response.get('success'):
+                    analysis_content = ai_response.get('analysis', {})
+                    if isinstance(analysis_content, str):
+                        try:
+                            analysis_content = json.loads(analysis_content)
+                        except:
+                            pass
+
+                    if isinstance(analysis_content, dict):
+                        detailed_analysis = analysis_content.get('detailed_analysis_text', detailed_analysis)
+                        # Recommended actions can be derived from investigation_steps_suggested
+                        confidence = analysis_content.get('confidence', confidence)
+                else:
+                    logger.warning(
+                        f"AI call for data anomaly risk insight failed: {ai_response.get('error') if ai_response else 'N/A'}")
+            except Exception as e:
+                logger.error(f"Error during AI call for data anomaly risk insight: {e}")
+
+        return BusinessInsight(
+            insight_id=insight_id,
+            insight_type=InsightType.RISK_WARNING,
+            priority=priority,
+            title=title,
+            summary=summary,
+            detailed_analysis=detailed_analysis,
+            key_metrics=key_metrics,
+            supporting_data={"anomalies_detected_sample": anomalies[:5]},  # 只取前5个异常作为支持数据
+            confidence_score=confidence,
+            recommended_actions=[],
+            # 由 _generate_actionable_recommendations (特别是 _generate_risk_mitigation_actions) 填充
+            expected_impact="及时发现和处理数据异常，可避免基于错误数据的决策，降低运营风险。",
+            implementation_difficulty="中等",
+            data_sources=["Varies (based on anomaly source)"],  # 需要从anomalies对象中提取
+            analysis_timestamp=datetime.now().isoformat(),
+            applicable_timeframe="需立即关注和调查"
+        )
+
+
 
     async def _generate_risk_mitigation_actions(self, insight: BusinessInsight,
                                                 processed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
