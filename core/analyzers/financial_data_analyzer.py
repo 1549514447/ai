@@ -362,92 +362,92 @@ class FinancialDataAnalyzer:
             logger.error(f"❌ 业务表现分析失败: {str(e)}")
             return self._create_error_analysis_result("performance_analysis", str(e))
 
-    async def detect_anomalies(self, data_source: str, metrics: List[str],
-                               sensitivity: float = 2.0) -> AnalysisResult:
-        """
-        🚨 异常检测 - 检测数据中的异常模式
-
-        Args:
-            data_source: 数据源类型
-            metrics: 检测的指标列表
-            sensitivity: 敏感度 (标准差倍数)
-
-        Returns:
-            AnalysisResult: 异常检测结果
-        """
-        try:
-            logger.info(f"🚨 开始异常检测: {data_source}, 指标: {metrics}")
-
-            analysis_start_time = datetime.now()
-
-            # Step 1: 准备异常检测数据
-            anomaly_data = await self._prepare_anomaly_detection_data(data_source, metrics)
-
-            # Step 2: 统计学异常检测
-            statistical_anomalies = await self._statistical_anomaly_detection(
-                anomaly_data, metrics, sensitivity
-            )
-
-            # Step 3: AI模式异常检测
-            pattern_anomalies = await self._ai_pattern_anomaly_detection(
-                anomaly_data, statistical_anomalies
-            )
-
-            # Step 4: 业务逻辑异常检测
-            business_anomalies = await self._business_logic_anomaly_detection(
-                anomaly_data, metrics
-            )
-
-            # Step 5: 异常综合评估和分类
-            consolidated_anomalies = self._consolidate_anomalies(
-                statistical_anomalies, pattern_anomalies, business_anomalies
-            )
-
-            # Step 6: 异常影响评估
-            impact_assessment = await self._assess_anomaly_impact(consolidated_anomalies, data_source)
-
-            # Step 7: AI异常解释和建议
-            anomaly_insights = await self._ai_explain_anomalies(consolidated_anomalies, impact_assessment)
-
-            processing_time = (datetime.now() - analysis_start_time).total_seconds()
-
-            analysis_result = AnalysisResult(
-                analysis_id=f"anomaly_{data_source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                analysis_type=AnalysisType.ANOMALY_DETECTION,
-                analysis_scope=self._determine_analysis_scope(data_source),
-                confidence_score=anomaly_insights.get('confidence', 0.8),
-
-                key_findings=anomaly_insights.get('key_findings', []),
-                trends=[],
-                anomalies=consolidated_anomalies,
-                metrics={'total_anomalies': len(consolidated_anomalies), 'sensitivity': sensitivity},
-
-                business_insights=anomaly_insights.get('insights', []),
-                risk_factors=impact_assessment.get('risks', []),
-                opportunities=impact_assessment.get('opportunities', []),
-                recommendations=anomaly_insights.get('recommendations', []),
-
-                data_quality=anomaly_data.get('data_quality', DataQuality.GOOD),
-                analysis_metadata={
-                    'data_source': data_source,
-                    'metrics_checked': metrics,
-                    'sensitivity_level': sensitivity,
-                    'detection_methods': ['statistical', 'pattern', 'business_logic']
-                },
-                processing_time=processing_time,
-                timestamp=datetime.now().isoformat()
-            )
-
-            # 更新异常统计
-            self.analysis_stats['anomalies_detected'] += len(consolidated_anomalies)
-            self._update_analysis_stats('anomaly_detection', anomaly_insights.get('confidence', 0.8))
-
-            logger.info(f"✅ 异常检测完成: 发现{len(consolidated_anomalies)}个异常")
-            return analysis_result
-
-        except Exception as e:
-            logger.error(f"❌ 异常检测失败: {str(e)}")
-            return self._create_error_analysis_result("anomaly_detection", str(e))
+    # async def detect_anomalies(self, data_source: str, metrics: List[str],
+    #                            sensitivity: float = 2.0) -> AnalysisResult:
+    #     """
+    #     🚨 异常检测 - 检测数据中的异常模式
+    #
+    #     Args:
+    #         data_source: 数据源类型
+    #         metrics: 检测的指标列表
+    #         sensitivity: 敏感度 (标准差倍数)
+    #
+    #     Returns:
+    #         AnalysisResult: 异常检测结果
+    #     """
+    #     try:
+    #         logger.info(f"🚨 开始异常检测: {data_source}, 指标: {metrics}")
+    #
+    #         analysis_start_time = datetime.now()
+    #
+    #         # Step 1: 准备异常检测数据
+    #         anomaly_data = await self._prepare_anomaly_detection_data(data_source, metrics)
+    #
+    #         # Step 2: 统计学异常检测
+    #         statistical_anomalies = await self._statistical_anomaly_detection(
+    #             anomaly_data, metrics, sensitivity
+    #         )
+    #
+    #         # Step 3: AI模式异常检测
+    #         pattern_anomalies = await self._ai_pattern_anomaly_detection(
+    #             anomaly_data, statistical_anomalies
+    #         )
+    #
+    #         # Step 4: 业务逻辑异常检测
+    #         business_anomalies = await self._business_logic_anomaly_detection(
+    #             anomaly_data, metrics
+    #         )
+    #
+    #         # Step 5: 异常综合评估和分类
+    #         consolidated_anomalies = self._consolidate_anomalies(
+    #             statistical_anomalies, pattern_anomalies, business_anomalies
+    #         )
+    #
+    #         # Step 6: 异常影响评估
+    #         impact_assessment = await self._assess_anomaly_impact(consolidated_anomalies, data_source)
+    #
+    #         # Step 7: AI异常解释和建议
+    #         anomaly_insights = await self._ai_explain_anomalies(consolidated_anomalies, impact_assessment)
+    #
+    #         processing_time = (datetime.now() - analysis_start_time).total_seconds()
+    #
+    #         analysis_result = AnalysisResult(
+    #             analysis_id=f"anomaly_{data_source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+    #             analysis_type=AnalysisType.ANOMALY_DETECTION,
+    #             analysis_scope=self._determine_analysis_scope(data_source),
+    #             confidence_score=anomaly_insights.get('confidence', 0.8),
+    #
+    #             key_findings=anomaly_insights.get('key_findings', []),
+    #             trends=[],
+    #             anomalies=consolidated_anomalies,
+    #             metrics={'total_anomalies': len(consolidated_anomalies), 'sensitivity': sensitivity},
+    #
+    #             business_insights=anomaly_insights.get('insights', []),
+    #             risk_factors=impact_assessment.get('risks', []),
+    #             opportunities=impact_assessment.get('opportunities', []),
+    #             recommendations=anomaly_insights.get('recommendations', []),
+    #
+    #             data_quality=anomaly_data.get('data_quality', DataQuality.GOOD),
+    #             analysis_metadata={
+    #                 'data_source': data_source,
+    #                 'metrics_checked': metrics,
+    #                 'sensitivity_level': sensitivity,
+    #                 'detection_methods': ['statistical', 'pattern', 'business_logic']
+    #             },
+    #             processing_time=processing_time,
+    #             timestamp=datetime.now().isoformat()
+    #         )
+    #
+    #         # 更新异常统计
+    #         self.analysis_stats['anomalies_detected'] += len(consolidated_anomalies)
+    #         self._update_analysis_stats('anomaly_detection', anomaly_insights.get('confidence', 0.8))
+    #
+    #         logger.info(f"✅ 异常检测完成: 发现{len(consolidated_anomalies)}个异常")
+    #         return analysis_result
+    #
+    #     except Exception as e:
+    #         logger.error(f"❌ 异常检测失败: {str(e)}")
+    #         return self._create_error_analysis_result("anomaly_detection", str(e))
 
     # ============= 数据准备和预处理 =============
 

@@ -36,25 +36,35 @@ class QueryComplexity(Enum):
 
 
 class QueryType(Enum):
-    """查询类型分类"""
-    DATA_RETRIEVAL = "data_retrieval"  # 数据查询
-    TREND_ANALYSIS = "trend_analysis"  # 趋势分析
-    PREDICTION = "prediction"  # 预测分析
-    COMPARISON = "comparison"  # 对比分析
-    CALCULATION = "calculation"  # 计算场景
-    RISK_ASSESSMENT = "risk_assessment"  # 风险评估
-    SCENARIO_SIMULATION = "scenario_simulation"  # 场景模拟
+    """定义了用户查询的意图类型"""
+    UNKNOWN = "unknown"  # 未知类型
+    DATA_RETRIEVAL = "data_retrieval"  # 数据获取 (例如 "今天的余额是多少?")
+    CALCULATION = "calculation"  # 计算请求 (例如 "A产品的年化收益率是多少?")
+    TREND_ANALYSIS = "trend_analysis"  # 趋势分析 (例如 "过去一个月的用户增长趋势?")
+    COMPARISON = "comparison"  # 对比分析 (例如 "A产品和B产品的表现对比")
+    PREDICTION = "prediction"  # 预测请求 (例如 "预测下个季度的资金缺口")
+    SCENARIO_SIMULATION = "scenario_simulation"  # 场景模拟 (例如 "如果复投率提高到50%会怎样?")
+    RISK_ASSESSMENT = "risk_assessment"  # 风险评估 (例如 "当前投资组合的风险有多大?")
+    OPTIMIZATION = "optimization"  # 优化建议 (例如 "如何优化我的产品组合以提高收益?")
+    DEFINITION_EXPLANATION = "definition_explanation" # 定义解释 (例如 "什么是市盈率?")
+    SYSTEM_COMMAND = "system_command" # 系统指令 (例如 "重置对话")
+    GENERAL_KNOWLEDGE = "general_knowledge" # 新增成员
 
 
+# core/analyzers/query_parser.py
 class BusinessScenario(Enum):
-    """业务场景类型"""
-    DAILY_OPERATIONS = "daily_operations"  # 日常运营
-    FINANCIAL_PLANNING = "financial_planning"  # 财务规划
-    RISK_MANAGEMENT = "risk_management"  # 风险管理
-    GROWTH_ANALYSIS = "growth_analysis"  # 增长分析
-    USER_BEHAVIOR = "user_behavior"  # 用户行为
-    PRODUCT_PERFORMANCE = "product_performance"  # 产品表现
-    COMPLIANCE_CHECK = "compliance_check"  # 合规检查
+    """定义了查询可能涉及的业务场景"""
+    UNKNOWN = "unknown_scenario"                 # 未知业务场景
+    FINANCIAL_OVERVIEW = "financial_overview"    # 财务概览 (例如 "当前总资产")
+    DAILY_OPERATIONS = "daily_operations"        # 日常运营 (例如 "今日新增用户")
+    USER_ANALYSIS = "user_analysis"              # 用户行为分析
+    PRODUCT_ANALYSIS = "product_analysis"        # 产品表现分析
+    RISK_MANAGEMENT = "risk_management"          # 风险管理与预警
+    INVESTMENT_STRATEGY = "investment_strategy"  # 投资策略与复投
+    MARKETING_CAMPAIGN = "marketing_campaign"    # 市场活动效果分析
+    FUTURE_PROJECTION = "future_projection"      # 未来趋势与资金预测
+    HISTORICAL_PERFORMANCE = "historical_performance" # 历史业绩回顾
+    REGULATORY_COMPLIANCE = "regulatory_compliance" # 合规性检查 (未来可能)
 
 
 @dataclass

@@ -689,13 +689,13 @@ async def get_enhanced_analytics_data():
             )
             analysis_results.append(perf_res)
 
-        if analysis_type == 'comprehensive' or analysis_type == 'risk':
-            risk_metrics = metrics_to_analyze if metrics_to_analyze else ['total_balance', 'daily_outflow']
-            risk_res = await orchestrator.financial_data_analyzer.detect_anomalies(
-                data_source=analysis_scope if analysis_scope in ['system', 'daily'] else 'system',  # Adapt scope
-                metrics=risk_metrics
-            )
-            analysis_results.append(risk_res)
+        # if analysis_type == 'comprehensive' or analysis_type == 'risk':
+        #     risk_metrics = metrics_to_analyze if metrics_to_analyze else ['total_balance', 'daily_outflow']
+        #     risk_res = await orchestrator.financial_data_analyzer.detect_anomalies(
+        #         data_source=analysis_scope if analysis_scope in ['system', 'daily'] else 'system',  # Adapt scope
+        #         metrics=risk_metrics
+        #     )
+        #     analysis_results.append(risk_res)
 
         # 如果没有选择具体分析类型但有指标，默认做趋势分析
         if not analysis_results and metrics_to_analyze:
