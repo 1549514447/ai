@@ -29,9 +29,9 @@ from core.analyzers.data_requirements_analyzer import DataRequirementsAnalyzer, 
 from core.analyzers.financial_data_analyzer import FinancialDataAnalyzer, create_financial_data_analyzer
 from core.analyzers.insight_generator import InsightGenerator, create_insight_generator
 from core.data_orchestration.smart_data_fetcher import SmartDataFetcher, create_smart_data_fetcher
-from core.processors.current_data_processor import CurrentDataProcessor
-from core.processors.historical_analysis_processor import HistoricalAnalysisProcessor
-from core.processors.prediction_processor import PredictionProcessor
+from data.processors.current_data_processor import CurrentDataProcessor
+from data.processors.historical_analysis_processor import HistoricalAnalysisProcessor
+from data.processors.prediction_processor import PredictionProcessor
 
 logger = logging.getLogger(__name__)
 
