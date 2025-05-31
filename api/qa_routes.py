@@ -243,7 +243,7 @@ async def create_new_conversation():
     request_id = str(uuid.uuid4())
     logger.info(f"💬 RequestID: {request_id} - API: /conversations - 收到创建新对话请求...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         request_json = request.get_json()
@@ -306,7 +306,7 @@ async def get_conversation_details(conversation_id_str: str):
     request_id = str(uuid.uuid4())
     logger.info(f"📄 RequestID: {request_id} - API: /conversations/{conversation_id_str} - 请求获取对话详情...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         # 验证conversation_id_str是否可以转换为整数或直接使用字符串
@@ -346,7 +346,7 @@ async def get_user_conversation_list(user_id: int):
     request_id = str(uuid.uuid4())
     logger.info(f"📋 RequestID: {request_id} - API: /conversations/user/{user_id} - 请求获取角色对话列表...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         if user_id not in [0, 1]:  # 只允许0或1
@@ -406,7 +406,7 @@ async def get_all_conversations():
     request_id = str(uuid.uuid4())
     logger.info(f"📋 RequestID: {request_id} - API: /conversations - 请求获取对话列表...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         limit = request.args.get('limit', 20, type=int)
@@ -450,7 +450,7 @@ async def get_all_conversations():
 
         logger.info(
             f"RequestID: {request_id} - ✅ API: 获取对话列表成功 (Limit: {limit}, Offset: {offset}, Filter: {user_id_filter}, Returned: {len(conversations)})")
-        
+
         return create_api_success_response({
             'conversations': conversations,
             'pagination': {
@@ -479,7 +479,7 @@ async def delete_conversation(conversation_id_str: str):
     request_id = str(uuid.uuid4())
     logger.info(f"🗑️ RequestID: {request_id} - API: DELETE /conversations/{conversation_id_str} - 请求删除对话...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         # 验证conversation_id并删除
@@ -496,7 +496,7 @@ async def delete_conversation(conversation_id_str: str):
 
         logger.info(f"RequestID: {request_id} - ✅ API: 删除对话成功: ID={conversation_id_str}")
         return create_api_success_response(
-            {'conversation_id': conversation_id_str}, 
+            {'conversation_id': conversation_id_str},
             "对话删除成功"
         )
 
@@ -521,7 +521,7 @@ async def update_conversation_title(conversation_id_str: str):
     request_id = str(uuid.uuid4())
     logger.info(f"✏️ RequestID: {request_id} - API: PUT /conversations/{conversation_id_str} - 请求更新对话标题...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         request_json = request.get_json()
@@ -533,7 +533,7 @@ async def update_conversation_title(conversation_id_str: str):
         if not new_title:
             return create_api_error_response("标题不能为空。", "validation_error", 400,
                                              {"request_id": request_id})
-        
+
         if len(new_title) > 255:
             new_title = new_title[:252] + "..."
 
@@ -551,7 +551,7 @@ async def update_conversation_title(conversation_id_str: str):
 
         logger.info(f"RequestID: {request_id} - ✅ API: 更新对话标题成功: ID={conversation_id_str}, Title={new_title}")
         return create_api_success_response(
-            {'conversation_id': conversation_id_str, 'title': new_title}, 
+            {'conversation_id': conversation_id_str, 'title': new_title},
             "对话标题更新成功"
         )
 
@@ -570,7 +570,6 @@ async def qa_system_health_check():
     🔍 QA服务健康检查 - 调用编排器的全面健康检查。
     """
     request_id = str(uuid.uuid4())
-    logger.info(f"🔍 RequestID: {request_id} - API: /system/health - 执行QA系统健康检查...")
     try:
         if not orchestrator.initialized:
             try:
@@ -588,7 +587,6 @@ async def qa_system_health_check():
         http_status_code = 200 if overall_status == 'healthy' else 503 if overall_status in ['unhealthy',
                                                                                              'initializing'] else 200
 
-        logger.info(f"RequestID: {request_id} - ✅ API: QA系统健康检查完成: Status={overall_status}")
         # 添加 request_id 到响应中
         health_status_with_req_id = {"request_id": request_id, **health_status}
         return jsonify(health_status_with_req_id), http_status_code
@@ -608,7 +606,7 @@ async def get_qa_system_statistics():
     request_id = str(uuid.uuid4())
     logger.info(f"📊 RequestID: {request_id} - API: /system/stats - 请求获取QA系统统计信息...")
     try:
-        if not orchestrator.initialized: 
+        if not orchestrator.initialized:
             await orchestrator.initialize()
 
         orchestrator_stats = orchestrator.get_orchestrator_stats()

@@ -88,7 +88,67 @@ class DateUtils:
             if self.claude_client:
                 ai_result = await self._ai_parse_dates(query, context)
                 if ai_result["success"]:
-                    return self._process_ai_parse_result(ai_result["analysis"])
+                    # 直接使用AI解析结果，但确保格式兼容
+                    analysis_text = ai_result["analysis"]
+                    
+                    # 尝试将字符串解析为JSON
+                    try:
+                        # 查找JSON内容的开始和结束位置
+                        start_idx = analysis_text.find('{')
+                        end_idx = analysis_text.rfind('}') + 1
+                        
+                        if start_idx >= 0 and end_idx > start_idx:
+                            json_str = analysis_text[start_idx:end_idx]
+                            analysis = json.loads(json_str)
+                            logger.info("成功从AI响应中提取JSON数据")
+                        else:
+                            logger.warning("无法在AI响应中找到JSON数据，使用基础解析")
+                            return self._basic_date_parse(query)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"AI响应解析JSON失败: {e}，使用基础解析")
+                        return self._basic_date_parse(query)
+                    
+                    # 处理日期范围，确保是DateRange对象列表
+                    ranges = []
+                    if "date_ranges" in analysis:
+                        for range_item in analysis["date_ranges"]:
+                            if isinstance(range_item, dict) and "start_date" in range_item and "end_date" in range_item:
+                                ranges.append(DateRange(
+                                    start_date=range_item["start_date"],
+                                    end_date=range_item["end_date"],
+                                    range_type=range_item.get("range_type", "explicit"),
+                                    confidence=range_item.get("confidence", 0.8),
+                                    description=range_item.get("description", "从AI解析的日期范围")
+                                ))
+                    
+                    # 提取具体日期列表
+                    dates = []
+                    if "specific_dates" in analysis:
+                        for date_item in analysis["specific_dates"]:
+                            if isinstance(date_item, dict) and "parsed_date" in date_item:
+                                dates.append(date_item["parsed_date"])
+                    
+                    # 提取相对时间术语
+                    relative_terms = []
+                    if "relative_periods" in analysis:
+                        for period in analysis["relative_periods"]:
+                            if isinstance(period, dict) and "original_text" in period:
+                                relative_terms.append(period["original_text"])
+                    
+                    # 生成API格式日期
+                    api_format_dates = []
+                    for date_str in dates:
+                        if date_str:  # 确保日期字符串不为空
+                            api_format_dates.append(self.date_to_api_format(date_str))
+                    
+                    return DateParseResult(
+                        dates=dates,
+                        ranges=ranges,
+                        relative_terms=relative_terms,
+                        has_time_info=analysis.get("has_time_info", bool(dates or ranges)),
+                        parse_confidence=analysis.get("parsing_confidence", 0.8),
+                        api_format_dates=api_format_dates
+                    )
 
             # 降级到基础解析
             logger.warning("Claude不可用，使用基础日期解析")
@@ -154,11 +214,30 @@ class DateUtils:
     "has_time_info": true/false
 }}
 
-注意事项:
+重要指导原则:
+1. 当查询中包含"今天"、"昨天"、"明天"等明确的单日表达时:
+   - 只返回对应的单日范围
+   - 不要生成额外的月度或周度范围
+   - 将time_complexity设置为"simple"
+   - 不要在inferred_requirements中推断额外的时间范围
+
+2. 当查询中包含"本月"、"上个月"等明确的月度表达时:
+   - 返回准确的月份范围
+   - 将time_complexity设置为"medium"
+
+3. 当查询中没有明确时间表达时:
+   - 根据查询类型推断合理的时间范围
+   - 考虑金融分析的常见时间模式(日/周/月/季度)
+   - 将time_complexity设置为"medium"或"complex"
+
+4. 时间复杂度评估标准:
+   - simple: 单日查询、明确的单个日期
+   - medium: 月度查询、明确的日期范围、最近N天
+   - complex: 多个时间段比较、季度/年度分析、复杂的时间模式
+
+其他注意事项:
 - 将所有日期统一转换为YYYY-MM-DD格式
 - 对于"过去30天"等相对时间，计算具体的日期范围
-- 如果查询没有明确时间，根据查询类型推断合理的时间范围
-- 考虑金融分析的常见时间模式(日/周/月/季度)
 """
 
         try:
@@ -183,43 +262,83 @@ class DateUtils:
         """处理AI解析结果，转换为标准格式"""
 
         try:
+            # 确保ai_analysis是字典类型
+            if isinstance(ai_analysis, str):
+                try:
+                    logger.info("AI分析结果是字符串类型，尝试解析为JSON")
+                    # 尝试找到JSON部分
+                    if '{' in ai_analysis and '}' in ai_analysis:
+                        # 尝试提取JSON部分
+                        start_idx = ai_analysis.find('{')
+                        end_idx = ai_analysis.rfind('}') + 1
+                        json_str = ai_analysis[start_idx:end_idx]
+                        try:
+                            ai_analysis = json.loads(json_str)
+                            logger.info("成功从字符串中提取并解析JSON部分")
+                        except json.JSONDecodeError:
+                            logger.warning(f"提取的JSON部分解析失败: {json_str[:100]}...")
+                            # 继续使用字符串解析
+                    else:
+                        logger.warning("字符串中没有找到JSON格式内容")
+                except json.JSONDecodeError:
+                    logger.error("无法将AI分析结果解析为JSON")
+                    
+                # 如果仍然是字符串，尝试直接从文本中提取日期信息
+                if isinstance(ai_analysis, str):
+                    logger.info("尝试从文本中直接提取日期信息")
+                    return self._extract_dates_from_text(ai_analysis)
+            
+            if not isinstance(ai_analysis, dict):
+                logger.error(f"AI分析结果不是字典类型: {type(ai_analysis)}")
+                logger.debug(f"AI分析结果内容预览: {str(ai_analysis)[:200]}...")
+                return self._create_empty_parse_result()
+
             # 提取具体日期
             dates = []
             for date_info in ai_analysis.get("specific_dates", []):
-                dates.append(date_info["parsed_date"])
+                if isinstance(date_info, dict):
+                    dates.append(date_info.get("parsed_date", ""))
+                else:
+                    logger.warning(f"日期信息不是字典类型: {date_info}")
 
             # 提取日期范围
             ranges = []
             for range_info in ai_analysis.get("date_ranges", []):
-                ranges.append(DateRange(
-                    start_date=range_info["start_date"],
-                    end_date=range_info["end_date"],
-                    range_type=range_info.get("range_type", "explicit"),
-                    confidence=range_info.get("confidence", 0.8),
-                    description=range_info.get("description", "")
-                ))
+                if isinstance(range_info, dict) and "start_date" in range_info and "end_date" in range_info:
+                    ranges.append(DateRange(
+                        start_date=range_info["start_date"],
+                        end_date=range_info["end_date"],
+                        range_type=range_info.get("range_type", "explicit"),
+                        confidence=range_info.get("confidence", 0.8),
+                        description=range_info.get("description", "")
+                    ))
+                else:
+                    logger.warning(f"范围信息不是有效的字典: {range_info}")
 
             # 处理相对时间期间
             for period_info in ai_analysis.get("relative_periods", []):
-                ranges.append(DateRange(
-                    start_date=period_info["estimated_start"],
-                    end_date=period_info["estimated_end"],
-                    range_type="relative",
-                    confidence=period_info.get("confidence", 0.7),
-                    description=period_info["original_text"]
-                ))
+                if isinstance(period_info, dict) and "estimated_start" in period_info and "estimated_end" in period_info:
+                    ranges.append(DateRange(
+                        start_date=period_info["estimated_start"],
+                        end_date=period_info["estimated_end"],
+                        range_type="relative",
+                        confidence=period_info.get("confidence", 0.7),
+                        description=period_info.get("original_text", "")
+                    ))
+                else:
+                    logger.warning(f"时间段信息不是有效的字典: {period_info}")
 
             # 提取相对时间术语
-            relative_terms = [
-                period["period_type"]
-                for period in ai_analysis.get("relative_periods", [])
-            ]
+            relative_terms = []
+            for period in ai_analysis.get("relative_periods", []):
+                if isinstance(period, dict) and "period_type" in period:
+                    relative_terms.append(period["period_type"])
 
             # 生成API格式日期
-            api_format_dates = [
-                self.date_to_api_format(date_str)
-                for date_str in dates
-            ]
+            api_format_dates = []
+            for date_str in dates:
+                if date_str:  # 确保日期字符串不为空
+                    api_format_dates.append(self.date_to_api_format(date_str))
 
             return DateParseResult(
                 dates=dates,
@@ -233,8 +352,105 @@ class DateUtils:
         except Exception as e:
             logger.error(f"❌ AI结果处理失败: {str(e)}")
             return self._create_empty_parse_result()
-
-    # ============= 时间范围智能计算 =============
+            
+    def _extract_dates_from_text(self, text: str) -> DateParseResult:
+        """从文本中直接提取日期信息"""
+        logger.info("开始从文本中提取日期信息")
+        
+        # 初始化结果
+        dates = []
+        ranges = []
+        relative_terms = []
+        
+        try:
+            # 记录原始文本的前200个字符用于调试
+            logger.debug(f"文本内容预览: {text[:200]}...")
+            
+            # 1. 尝试提取YYYY-MM-DD格式的日期
+            import re
+            date_pattern = r'\d{4}-\d{2}-\d{2}'
+            found_dates = re.findall(date_pattern, text)
+            
+            if found_dates:
+                logger.info(f"从文本中提取到 {len(found_dates)} 个日期")
+                dates.extend(found_dates)
+                
+                # 2. 尝试识别日期范围
+                # 查找相邻的日期对，可能是日期范围
+                if len(found_dates) >= 2:
+                    # 简单处理：将第一个和最后一个日期作为范围
+                    ranges.append(DateRange(
+                        start_date=found_dates[0],
+                        end_date=found_dates[-1],
+                        range_type="inferred",
+                        confidence=0.6,
+                        description="从文本推断的日期范围"
+                    ))
+                    logger.info(f"推断日期范围: {found_dates[0]} 到 {found_dates[-1]}")
+            else:
+                logger.warning("未从文本中找到标准格式的日期")
+                
+                # 3. 尝试识别相对时间术语
+                relative_keywords = [
+                    "今天", "昨天", "明天", "上周", "本周", "下周", 
+                    "上个月", "本月", "下个月", "去年", "今年", "明年",
+                    "过去", "最近", "未来"
+                ]
+                
+                for keyword in relative_keywords:
+                    if keyword in text:
+                        relative_terms.append(keyword)
+                        logger.info(f"找到相对时间术语: {keyword}")
+                
+                # 如果找到相对时间术语，创建一个基于当前日期的范围
+                if relative_terms:
+                    today = self.current_date
+                    
+                    # 默认为最近30天
+                    start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+                    end_date = today.strftime("%Y-%m-%d")
+                    
+                    # 根据相对术语调整范围
+                    if "上周" in relative_terms:
+                        start_date = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+                        end_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+                    elif "本月" in relative_terms:
+                        start_date = today.replace(day=1).strftime("%Y-%m-%d")
+                    elif "上个月" in relative_terms:
+                        last_month = today.replace(day=1) - timedelta(days=1)
+                        start_date = last_month.replace(day=1).strftime("%Y-%m-%d")
+                        end_date = last_month.strftime("%Y-%m-%d")
+                    
+                    ranges.append(DateRange(
+                        start_date=start_date,
+                        end_date=end_date,
+                        range_type="relative",
+                        confidence=0.5,
+                        description=f"基于相对时间术语'{','.join(relative_terms)}'推断的范围"
+                    ))
+                    logger.info(f"基于相对时间推断范围: {start_date} 到 {end_date}")
+                    
+                    # 将推断的日期也添加到dates列表
+                    dates.append(end_date)
+            
+            # 生成API格式日期
+            api_format_dates = []
+            for date_str in dates:
+                if date_str:  # 确保日期字符串不为空
+                    api_format_dates.append(self.date_to_api_format(date_str))
+            
+            return DateParseResult(
+                dates=dates,
+                ranges=ranges,
+                relative_terms=relative_terms,
+                has_time_info=bool(dates or ranges or relative_terms),
+                parse_confidence=0.6 if dates else 0.4,
+                api_format_dates=api_format_dates
+            )
+            
+        except Exception as e:
+            logger.error(f"从文本提取日期失败: {str(e)}")
+            return self._create_empty_parse_result()
 
     async def infer_optimal_time_range(self, query: str, query_type: str = "analysis") -> DateRange:
         """
@@ -292,7 +508,18 @@ class DateUtils:
             })
 
             if result.get("success"):
-                analysis = result["analysis"]
+                analysis = result.get("analysis")
+                
+                # 确保analysis是字典类型
+                if not isinstance(analysis, dict):
+                    logger.warning(f"AI返回的分析结果不是字典类型: {type(analysis)}")
+                    return self._basic_infer_time_range(query_type)
+                
+                # 确保必要的键存在
+                if "recommended_start" not in analysis or "recommended_end" not in analysis:
+                    logger.warning("AI分析结果缺少必要的日期字段")
+                    return self._basic_infer_time_range(query_type)
+                
                 return DateRange(
                     start_date=analysis["recommended_start"],
                     end_date=analysis["recommended_end"],

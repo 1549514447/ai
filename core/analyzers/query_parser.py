@@ -1,1400 +1,762 @@
-# core/analyzers/query_parser.py
 """
-🧠 AI驱动的智能查询解析器
-金融AI分析系统的核心"大脑"，负责理解和分解复杂的金融业务查询
+🧠 Claude驱动的智能查询解析器 (重构版)
+专注于让Claude一步到位完成查询理解和执行决策
 
-核心特点:
-- 双AI协作的查询理解 (Claude + GPT-4o)
-- 智能复杂度评估和分级处理
-- 动态执行计划生成
-- 业务场景自动识别
-- 上下文感知的分析策略
+核心改进:
+- Claude直接决定API调用策略
+- 删除冗余的GPT数据需求分析
+- 简化数据结构和流程
+- 专注于决策而非复杂分析
 """
 
 import logging
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import json
-import asyncio
-from dataclasses import dataclass
-from enum import Enum
 import re
+import asyncio
+import traceback
+from dataclasses import dataclass, field
+from enum import Enum
 
-# 导入我们的工具类
-from utils.helpers.date_utils import DateUtils, create_date_utils, DateParseResult
-from utils.helpers.validation_utils import ValidationUtils, create_validation_utils
+# 导入AI客户端和工具
+from core.models.claude_client import ClaudeClient
+from utils.helpers.date_utils import DateUtils, create_date_utils
 
 logger = logging.getLogger(__name__)
 
 
+# ============= 枚举定义 =============
+
 class QueryComplexity(Enum):
     """查询复杂度等级"""
-    SIMPLE = "simple"  # 简单查询 (单一数据获取)
+    SIMPLE = "simple"  # 简单查询 (直接数据获取)
     MEDIUM = "medium"  # 中等复杂 (基础分析计算)
     COMPLEX = "complex"  # 复杂查询 (多步骤分析)
     EXPERT = "expert"  # 专家级 (深度预测分析)
 
 
 class QueryType(Enum):
-    """定义了用户查询的意图类型"""
+    """查询意图类型"""
+    DATA_RETRIEVAL = "data_retrieval"  # 数据获取
+    CALCULATION = "calculation"  # 计算请求
+    TREND_ANALYSIS = "trend_analysis"  # 趋势分析
+    COMPARISON = "comparison"  # 对比分析
+    PREDICTION = "prediction"  # 预测请求
+    SCENARIO_SIMULATION = "scenario_simulation"  # 场景模拟
+    RISK_ASSESSMENT = "risk_assessment"  # 风险评估
+    GENERAL_KNOWLEDGE = "general_knowledge"  # 一般知识
     UNKNOWN = "unknown"  # 未知类型
-    DATA_RETRIEVAL = "data_retrieval"  # 数据获取 (例如 "今天的余额是多少?")
-    CALCULATION = "calculation"  # 计算请求 (例如 "A产品的年化收益率是多少?")
-    TREND_ANALYSIS = "trend_analysis"  # 趋势分析 (例如 "过去一个月的用户增长趋势?")
-    COMPARISON = "comparison"  # 对比分析 (例如 "A产品和B产品的表现对比")
-    PREDICTION = "prediction"  # 预测请求 (例如 "预测下个季度的资金缺口")
-    SCENARIO_SIMULATION = "scenario_simulation"  # 场景模拟 (例如 "如果复投率提高到50%会怎样?")
-    RISK_ASSESSMENT = "risk_assessment"  # 风险评估 (例如 "当前投资组合的风险有多大?")
-    OPTIMIZATION = "optimization"  # 优化建议 (例如 "如何优化我的产品组合以提高收益?")
-    DEFINITION_EXPLANATION = "definition_explanation" # 定义解释 (例如 "什么是市盈率?")
-    SYSTEM_COMMAND = "system_command" # 系统指令 (例如 "重置对话")
-    GENERAL_KNOWLEDGE = "general_knowledge" # 新增成员
 
 
-# core/analyzers/query_parser.py
 class BusinessScenario(Enum):
-    """定义了查询可能涉及的业务场景"""
-    UNKNOWN = "unknown_scenario"                 # 未知业务场景
-    FINANCIAL_OVERVIEW = "financial_overview"    # 财务概览 (例如 "当前总资产")
-    DAILY_OPERATIONS = "daily_operations"        # 日常运营 (例如 "今日新增用户")
-    USER_ANALYSIS = "user_analysis"              # 用户行为分析
-    PRODUCT_ANALYSIS = "product_analysis"        # 产品表现分析
-    RISK_MANAGEMENT = "risk_management"          # 风险管理与预警
-    INVESTMENT_STRATEGY = "investment_strategy"  # 投资策略与复投
-    MARKETING_CAMPAIGN = "marketing_campaign"    # 市场活动效果分析
-    FUTURE_PROJECTION = "future_projection"      # 未来趋势与资金预测
-    HISTORICAL_PERFORMANCE = "historical_performance" # 历史业绩回顾
-    REGULATORY_COMPLIANCE = "regulatory_compliance" # 合规性检查 (未来可能)
-    FINANCIAL_PLANNING = "financial_planning"    # 财务规划
-    GROWTH_ANALYSIS = "growth_analysis"          # 增长分析
-    USER_BEHAVIOR = "user_behavior"              # 用户行为
-    PRODUCT_PERFORMANCE = "product_performance"  # 产品表现
-    COMPLIANCE_CHECK = "compliance_check"        # 合规检查
+    """业务场景类型"""
+    FINANCIAL_OVERVIEW = "financial_overview"  # 财务概览
+    DAILY_OPERATIONS = "daily_operations"  # 日常运营
+    USER_ANALYSIS = "user_analysis"  # 用户行为分析
+    PRODUCT_ANALYSIS = "product_analysis"  # 产品表现分析
+    HISTORICAL_PERFORMANCE = "historical_performance"  # 历史业绩
+    FUTURE_PROJECTION = "future_projection"  # 未来预测
+    RISK_MANAGEMENT = "risk_management"  # 风险管理
+    UNKNOWN_SCENARIO = "unknown_scenario"  # 未知场景
 
 
-@dataclass
-class ExecutionStep:
-    """执行步骤数据类"""
-    step_id: str  # 步骤ID
-    step_type: str  # 步骤类型
-    description: str  # 步骤描述
-    required_data: List[str]  # 需要的数据
-    processing_method: str  # 处理方法
-    dependencies: List[str]  # 依赖的步骤
-    estimated_time: float  # 估计耗时(秒)
-    ai_model_preference: str  # 推荐的AI模型
-
+# ============= 数据类定义 =============
 
 @dataclass
 class QueryAnalysisResult:
-    """查询分析结果"""
-    original_query: str  # 原始查询
-    complexity: QueryComplexity  # 复杂度等级
-    query_type: QueryType  # 查询类型
-    business_scenario: BusinessScenario  # 业务场景
-    confidence_score: float  # 分析置信度
+    """
+    🎯 简化版查询分析结果
+    专注于Claude的理解和决策结果
+    """
+    # 基础理解结果
+    original_query: str
+    complexity: QueryComplexity
+    query_type: QueryType
+    business_scenario: BusinessScenario
+    confidence_score: float
 
-    # 时间相关
-    time_requirements: Dict[str, Any]  # 时间需求
-    date_parse_result: DateParseResult  # 日期解析结果
+    # 🎯 核心：Claude直接决定的执行策略
+    api_calls_needed: List[Dict[str, Any]] = field(default_factory=list)
+    needs_calculation: bool = False
+    calculation_type: Optional[str] = None
 
-    # 数据需求
-    data_requirements: Dict[str, Any]  # 数据需求
-    required_apis: List[str]  # 需要的API
-
-    # 业务参数
-    business_parameters: Dict[str, Any]  # 业务参数
-    calculation_requirements: Dict[str, Any]  # 计算需求
-
-    # 执行计划
-    execution_plan: List[ExecutionStep]  # 执行步骤
-    processing_strategy: str  # 处理策略
-
-    # AI协作策略
-    ai_collaboration_plan: Dict[str, Any]  # AI协作计划
+    # 简化的时间信息
+    time_range: Optional[Dict[str, str]] = None
 
     # 元数据
-    analysis_timestamp: str  # 分析时间戳
-    estimated_total_time: float  # 预估总耗时
-    processing_metadata: Dict[str, Any]  # 处理元数据
+    analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    processing_metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        return {
+            'original_query': self.original_query,
+            'complexity': self.complexity.value,
+            'query_type': self.query_type.value,
+            'business_scenario': self.business_scenario.value,
+            'confidence_score': self.confidence_score,
+            'api_calls_needed': self.api_calls_needed,
+            'needs_calculation': self.needs_calculation,
+            'calculation_type': self.calculation_type,
+            'time_range': self.time_range,
+            'analysis_timestamp': self.analysis_timestamp,
+            'processing_metadata': self.processing_metadata
+        }
+
+
+# ============= 主要类定义 =============
 
 class SmartQueryParser:
     """
-    🧠 AI驱动的智能查询解析器
+    🧠 Claude驱动的智能查询解析器 (重构版)
 
-    功能架构:
-    1. 双AI协作的查询理解
-    2. 智能复杂度评估
-    3. 动态执行计划生成
-    4. 自适应处理策略
+    核心功能:
+    1. Claude一步到位理解查询
+    2. 直接决定API调用策略
+    3. 判断是否需要GPT计算
+    4. 输出简化的执行计划
     """
 
-    def __init__(self, claude_client=None, gpt_client=None):
+    def __init__(self, claude_client: Optional[ClaudeClient] = None, gpt_client=None):
         """
         初始化智能查询解析器
 
         Args:
-            claude_client: Claude客户端，负责业务逻辑理解
-            gpt_client: GPT客户端，负责数据需求分析
+            claude_client: Claude客户端，负责查询理解和决策
+            gpt_client: 保留参数以兼容，但不再使用
         """
         self.claude_client = claude_client
-        self.gpt_client = gpt_client
-        self.date_utils = create_date_utils(claude_client)
-        self.validator = create_validation_utils(claude_client, gpt_client)
 
-        # 查询模式识别
-        self.query_patterns = self._load_query_patterns()
+        # 🆕 添加时间处理能力
+        self.date_utils = create_date_utils(claude_client) if claude_client else None
 
         # 处理统计
         self.processing_stats = {
             'total_queries': 0,
+            'successful_parses': 0,
+            'fallback_parses': 0,
+            'claude_failures': 0,
+            'average_confidence': 0.0,
             'complexity_distribution': {
-                'simple': 0,
-                'medium': 0,
-                'complex': 0,
-                'expert': 0
+                'simple': 0, 'medium': 0, 'complex': 0, 'expert': 0
             },
-            'query_type_distribution': {},
-            'ai_collaboration_usage': 0,
-            'average_confidence': 0.0
+            'query_type_distribution': {}
         }
 
-        logger.info("SmartQueryParser initialized with dual-AI capabilities")
+        logger.info("SmartQueryParser (Refactored) initialized with Claude-driven architecture")
 
-    def _load_query_patterns(self) -> Dict[str, Any]:
-        """加载查询模式库"""
-        return {
-            # 简单数据查询模式
-            "simple_data_patterns": [
-                r"今天|今日|当天.*?(余额|数据|情况)",
-                r"(多少|什么).*?(用户|余额|金额)",
-                r"显示|给我.*?(系统|概览|状态)",
-                r"查看|看看.*?(产品|数据)"
-            ],
-
-            # 历史趋势分析模式
-            "trend_analysis_patterns": [
-                r"(过去|最近).*?(\d+)(天|周|月).*?(趋势|变化|增长)",
-                r"对比.*?(上月|上周|去年)",
-                r".*?增长.*?(如何|怎么样)",
-                r"(平均|每日).*?(增长|变化)"
-            ],
-
-            # 预测分析模式
-            "prediction_patterns": [
-                r"预测|预计|预期.*?(未来|明天|下月|下周)",
-                r"(如果|假设).*?(会|将).*?(多少|怎样)",
-                r".*?月.*?会.*?(余额|资金)",
-                r"基于.*?预测"
-            ],
-
-            # 计算场景模式
-            "calculation_patterns": [
-                r"(复投|提现).*?(\d+%|百分之)",
-                r"计算.*?(如果|按照).*?比例",
-                r"(\d+%|\d+分之\d+).*?(复投|提现)",
-                r"不同.*?率.*?影响"
-            ],
-
-            # 风险评估模式
-            "risk_assessment_patterns": [
-                r"(没有|无).*?入金.*?(运行|持续).*?(多久|时间)",
-                r"风险|危险|安全.*?评估",
-                r"可持续.*?分析",
-                r"资金.*?耗尽"
-            ],
-
-            # 场景模拟模式
-            "scenario_simulation_patterns": [
-                r"(假设|如果|假定).*?情况下",
-                r"不同.*?场景.*?对比",
-                r"模拟.*?(情况|场景)",
-                r".*?情况.*?影响"
-            ]
-        }
-
-    # ============= 核心查询分析方法 =============
+    # ============= 核心查询解析方法 =============
 
     async def parse_complex_query(self, query: str, context: Dict[str, Any] = None) -> QueryAnalysisResult:
         """
-        🎯 解析复杂查询 - 核心入口方法
+        🎯 简化版查询解析 - Claude一步到位
 
         Args:
             query: 用户查询文本
-            context: 查询上下文 (用户信息、历史查询等)
+            context: 查询上下文 (对话历史等)
 
         Returns:
-            QueryAnalysisResult: 完整的查询分析结果
+            QueryAnalysisResult: 简化的查询分析结果
         """
         try:
-            logger.info(f"🧠 开始解析复杂查询: {query}")
+            logger.info(f"🧠 Claude解析查询: {query[:50]}...")
             self.processing_stats['total_queries'] += 1
 
-            # 第1步: 基础查询预处理
-            preprocessed_query = await self._preprocess_query(query)
+            # 基础预处理
+            clean_query = self._preprocess_query(query)
 
-            # 第2步: Claude深度理解查询意图和业务逻辑
-            claude_analysis = await self._claude_understand_query(preprocessed_query, context)
+            # 🎯 核心：Claude一步到位理解查询并制定执行计划
+            claude_plan = await self._claude_understand_and_plan(clean_query, context)
 
-            # 第3步: GPT分析数据需求和计算要求
-            gpt_analysis = await self._gpt_analyze_data_requirements(preprocessed_query, claude_analysis)
+            if not claude_plan.get("success"):
+                logger.warning(f"Claude理解失败: {claude_plan.get('error')}, 使用降级解析")
+                self.processing_stats['claude_failures'] += 1
+                return await self._fallback_analysis(query, claude_plan.get('error', ''))
 
-            # 第4步: 综合分析，确定复杂度和类型
-            complexity_analysis = await self._analyze_query_complexity(
-                preprocessed_query, claude_analysis, gpt_analysis
-            )
+            # 构建分析结果
+            result = self._build_analysis_result(query, claude_plan)
 
-            # 第5步: 解析时间和日期要求
-            time_analysis = await self._analyze_time_requirements(preprocessed_query, claude_analysis)
-
-            # 第6步: 生成执行计划
-            execution_plan = await self._generate_execution_plan(
-                preprocessed_query, claude_analysis, gpt_analysis, complexity_analysis
-            )
-
-            # 第7步: 设计AI协作策略
-            ai_collaboration_plan = self._design_ai_collaboration(
-                complexity_analysis, execution_plan
-            )
-
-            # 第8步: 构建最终分析结果
-            analysis_result = self._build_analysis_result(
-                query, preprocessed_query, claude_analysis, gpt_analysis,
-                complexity_analysis, time_analysis, execution_plan, ai_collaboration_plan
-            )
-
-            # 更新统计信息
-            self._update_processing_stats(analysis_result)
+            # 更新统计
+            self._update_processing_stats(result)
 
             logger.info(
-                f"✅ 查询解析完成: 复杂度={analysis_result.complexity.value}, 类型={analysis_result.query_type.value}")
-
-            return analysis_result
+                f"✅ Claude解析完成: {result.query_type.value} | APIs: {len(result.api_calls_needed)} | "
+                f"需要计算: {result.needs_calculation} | 置信度: {result.confidence_score:.2f}")
+            return result
 
         except Exception as e:
-            logger.error(f"❌ 查询解析失败: {str(e)}")
-            return self._create_error_analysis_result(query, str(e))
+            logger.error(f"❌ 查询解析失败: {str(e)}\n{traceback.format_exc()}")
+            self.processing_stats['claude_failures'] += 1
+            return await self._fallback_analysis(query, str(e))
 
-    # ============= Claude业务理解层 =============
-
-    async def _claude_understand_query(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Claude深度理解查询的业务逻辑和意图"""
-
+    async def _claude_understand_and_plan(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        🎯 Claude一步到位：理解查询 + 决定执行策略
+        """
         if not self.claude_client:
-            logger.warning("Claude客户端不可用，使用基础解析")
-            return await self._fallback_query_understanding(query)
+            logger.warning("Claude客户端不可用")
+            return {"success": False, "error": "Claude客户端未配置"}
 
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
+            current_date_api = datetime.now().strftime("%Y%m%d")
 
-            understanding_prompt = f"""
-你是一位资深的金融业务分析专家。请深度分析以下用户查询的业务意图和逻辑需求。
+            # 🎯 让Claude直接决定API调用和计算需求
+            planning_prompt = f"""
+你是金融AI系统的决策大脑。请分析用户查询并直接制定执行计划。
 
 用户查询: "{query}"
-当前日期: {current_date}
-查询上下文: {json.dumps(context or {}, ensure_ascii=False)}
+当前日期: {current_date} (API格式: {current_date_api})
+对话历史: {json.dumps(context or {}, ensure_ascii=False)[:200]}
 
-请从以下维度进行专业分析：
+请分析并返回JSON格式的执行计划：
 
-1. **核心业务意图**: 用户真正想了解什么业务问题？
-2. **业务场景分类**: 这属于哪种业务场景？(日常运营/财务规划/风险管理/增长分析/用户行为/产品表现)
-3. **分析深度要求**: 需要什么程度的分析？(概览/趋势/预测/深度建模)
-4. **业务逻辑复杂度**: 涉及多少层业务逻辑？
-5. **时间维度分析**: 涉及什么时间范围和时间概念？
-6. **关键业务参数**: 涉及哪些重要的业务参数？(复投率、增长率、风险系数等)
-7. **预期输出**: 用户期望得到什么样的答案格式？
-
-请返回JSON格式的分析结果：
 {{
-    "business_intent": {{
-        "primary_goal": "主要目标",
-        "secondary_goals": ["次要目标1", "次要目标2"],
-        "business_impact": "业务影响评估",
-        "urgency_level": "high/medium/low"
+    "query_understanding": {{
+        "complexity": "simple|medium|complex|expert",
+        "query_type": "data_retrieval|trend_analysis|prediction|calculation|comparison|risk_assessment|general_knowledge",
+        "business_scenario": "financial_overview|daily_operations|user_analysis|product_analysis|historical_performance|future_projection|risk_management",
+        "user_intent": "用户想要了解什么",
+        "confidence": 0.8
     }},
-    "business_scenario": {{
-        "primary_scenario": "主要业务场景",
-        "scenario_confidence": 0.0-1.0,
-        "related_scenarios": ["相关场景1", "相关场景2"]
+    "execution_plan": {{
+        "api_calls": [
+            {{
+                "api_method": "get_system_data",
+                "params": {{}},
+                "reason": "获取系统概览数据"
+            }}
+        ],
+        "needs_calculation": false,
+        "calculation_type": "statistics|trend_analysis|growth_calculation|prediction|comparison|none",
+        "calculation_description": "需要GPT做什么计算"
     }},
-    "analysis_requirements": {{
-        "depth_level": "overview/trend/prediction/deep_modeling",
-        "analysis_type": "descriptive/diagnostic/predictive/prescriptive",
-        "requires_forecasting": true/false,
-        "requires_scenario_analysis": true/false
-    }},
-    "business_logic_complexity": {{
-        "complexity_level": "simple/moderate/complex/expert",
-        "reasoning_steps": 估计推理步骤数,
-        "involves_multiple_factors": true/false,
-        "requires_business_assumptions": true/false
-    }},
-    "key_business_parameters": {{
-        "financial_metrics": ["关键财务指标"],
-        "operational_metrics": ["关键运营指标"], 
-        "risk_factors": ["风险因子"],
-        "external_factors": ["外部因素"]
-    }},
-    "expected_output_format": {{
-        "format_type": "summary/detailed_analysis/dashboard/report",
-        "visualization_needs": ["图表类型"],
-        "actionable_insights_required": true/false
-    }},
-    "confidence_assessment": {{
-        "understanding_confidence": 0.0-1.0,
-        "clarity_score": 0.0-1.0,
-        "potential_ambiguities": ["模糊点1", "模糊点2"]
+    "time_analysis": {{
+        "has_time_requirement": false,
+        "start_date": "20240501", 
+        "end_date": "20240531",
+        "time_description": "时间范围描述"
     }}
 }}
 
-重点关注业务逻辑的合理性和实用性，确保分析结果能够指导后续的数据获取和计算策略。
-"""
+可用的API方法：
+- get_system_data(): 当前系统概览 (总余额、用户统计、今日数据)
+- get_daily_data(date): 特定日期的业务数据，date格式为YYYYMMDD
+- get_product_data(): 产品信息和持有情况
+- get_product_end_data(date): 特定日期到期产品，date格式为YYYYMMDD
+- get_product_end_interval(start_date, end_date): 区间到期数据，日期格式为YYYYMMDD
+- get_user_daily_data(date): 用户每日统计，date格式为YYYYMMDD
+- get_user_data(page): 详细用户数据，page为页码
 
-            result = await self.claude_client.analyze_complex_query(understanding_prompt, {
-                "query": query,
-                "context": context,
-                "current_date": current_date
-            })
+计算类型说明：
+- statistics: 基础统计（均值、总和、增长率等）
+- trend_analysis: 趋势计算和模式识别
+- growth_calculation: 增长率和变化计算
+- prediction: 基于历史数据的预测
+- comparison: 对比分析
+- none: 不需要计算，直接展示数据
+
+分析规则：
+- 如果是"今天/今日"查询 → get_system_data + get_daily_data(今日日期)
+- 如果提到"历史/过去N天"时间 → 需要时间范围的API + 可能需要计算
+- 如果是余额/概览查询 → get_system_data
+- 如果是产品相关 → get_product_data
+- 如果提到"到期" → get_product_end_* 相关API
+- 如果提到用户/注册 → get_user_daily_data 或 get_user_data
+- 如果需要"分析/计算/趋势/预测" → needs_calculation = true
+
+日期格式要求：
+- 所有API的日期参数必须使用YYYYMMDD格式（如：20240501）
+- 今日日期是：{current_date_api}
+
+请根据用户查询选择最合适的API和计算类型，确保日期格式正确。
+"""
+            # 调用Claude
+            result = await asyncio.wait_for(
+                self.claude_client.analyze_complex_query(planning_prompt, {
+                    "query": query,
+                    "context": context,
+                    "current_date": current_date
+                }),
+                timeout=30.0  # 30秒超时
+            )
 
             if result.get("success"):
-                claude_analysis = result["analysis"]
-                logger.info("✅ Claude业务理解完成")
-                return {
-                    "success": True,
-                    "claude_understanding": claude_analysis,
-                    "processing_method": "claude_analysis"
-                }
-            else:
-                logger.warning(f"Claude分析失败: {result.get('error', 'Unknown error')}")
-                return await self._fallback_query_understanding(query)
+                # 解析Claude的分析结果
+                analysis_text = result.get("analysis", "{}")
 
-        except Exception as e:
-            logger.error(f"Claude业务理解异常: {str(e)}")
-            return await self._fallback_query_understanding(query)
+                # 尝试提取JSON
+                analysis = self._extract_json_from_response(analysis_text)
 
-    # ============= GPT数据需求分析层 =============
-
-    async def _gpt_analyze_data_requirements(self, query: str, claude_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """GPT分析数据需求和计算要求"""
-
-        if not self.gpt_client:
-            logger.warning("GPT客户端不可用，使用基础分析")
-            return self._fallback_data_requirements_analysis(query, claude_analysis)
-
-        try:
-            claude_understanding = claude_analysis.get("claude_understanding", {})
-
-            data_analysis_prompt = f"""
-基于业务分析结果，请精确分析查询的数据需求和计算要求：
-
-原始查询: "{query}"
-业务理解结果: {json.dumps(claude_understanding, ensure_ascii=False)}
-
-可用的API数据源:
-1. /api/sta/system - 系统概览 (总余额、用户统计、今日到期等)
-2. /api/sta/day - 每日数据 (注册、持仓、入金、出金)
-3. /api/sta/product - 产品数据 (产品列表、持有情况、到期预测)
-4. /api/sta/user_daily - 用户每日数据 (VIP分布、新增用户)
-5. /api/sta/user - 用户详情 (投资额、奖励、投报比)
-6. /api/sta/product_end - 单日到期数据
-7. /api/sta/product_end_interval - 区间到期数据
-
-请分析并返回JSON格式结果：
-{{
-    "required_data_sources": {{
-        "primary_apis": ["必需的主要API"],
-        "secondary_apis": ["可选的辅助API"],
-        "data_freshness_requirements": "realtime/daily/weekly"
-    }},
-    "time_range_requirements": {{
-        "historical_data_needed": true/false,
-        "prediction_horizon_needed": true/false,
-        "minimum_historical_days": 天数,
-        "optimal_historical_days": 天数
-    }},
-    "calculation_requirements": {{
-        "basic_calculations": ["基础计算类型"],
-        "advanced_calculations": ["高级计算类型"],
-        "requires_financial_modeling": true/false,
-        "requires_statistical_analysis": true/false,
-        "calculation_complexity": "simple/moderate/complex"
-    }},
-    "data_processing_needs": {{
-        "data_cleaning_required": true/false,
-        "data_alignment_needed": true/false,
-        "missing_data_handling": "ignore/interpolate/estimate",
-        "outlier_detection_needed": true/false
-    }},
-    "performance_considerations": {{
-        "estimated_data_volume": "small/medium/large",
-        "processing_intensity": "low/medium/high",
-        "real_time_requirements": true/false,
-        "caching_beneficial": true/false
-    }},
-    "validation_requirements": {{
-        "data_quality_checks": ["检查类型"],
-        "business_logic_validation": true/false,
-        "result_verification_needed": true/false
-    }}
-}}
-
-重点关注数据获取的效率和计算的准确性。
-"""
-
-            result = await self.gpt_client.process_direct_query(data_analysis_prompt, {
-                "query": query,
-                "claude_analysis": claude_understanding
-            })
-
-            if result.get("success"):
-                # 解析GPT的文本响应
-                gpt_response = result["response"]
-
-                try:
-                    # 尝试从响应中提取JSON
-                    import re
-                    json_match = re.search(r'\{.*\}', gpt_response, re.DOTALL)
-                    if json_match:
-                        gpt_analysis = json.loads(json_match.group())
-                        logger.info("✅ GPT数据需求分析完成")
+                if analysis:
+                    # 验证必要字段
+                    if self._validate_claude_response(analysis):
                         return {
                             "success": True,
-                            "gpt_analysis": gpt_analysis,
-                            "processing_method": "gpt_analysis"
+                            "claude_plan": analysis,
+                            "processing_method": "claude_integrated_planning"
                         }
                     else:
-                        # 如果没有找到JSON，使用文本解析
-                        return {
-                            "success": True,
-                            "gpt_analysis": {"raw_response": gpt_response},
-                            "processing_method": "gpt_text_analysis"
-                        }
-
-                except json.JSONDecodeError:
-                    logger.warning("GPT响应JSON解析失败，使用文本分析")
-                    return {
-                        "success": True,
-                        "gpt_analysis": {"raw_response": gpt_response},
-                        "processing_method": "gpt_text_fallback"
-                    }
+                        logger.error("Claude响应缺少必要字段")
+                        return {"success": False, "error": "Claude响应格式不完整"}
+                else:
+                    logger.error(f"无法解析Claude的JSON响应: {analysis_text[:200]}")
+                    return {"success": False, "error": "Claude响应JSON解析失败"}
             else:
-                logger.warning(f"GPT分析失败: {result.get('error', 'Unknown error')}")
-                return self._fallback_data_requirements_analysis(query, claude_analysis)
+                logger.error(f"Claude分析失败: {result.get('error')}")
+                return {"success": False, "error": result.get('error', 'Claude调用失败')}
 
+        except asyncio.TimeoutError:
+            logger.error("Claude调用超时")
+            return {"success": False, "error": "Claude响应超时"}
         except Exception as e:
-            logger.error(f"GPT数据需求分析异常: {str(e)}")
-            return self._fallback_data_requirements_analysis(query, claude_analysis)
+            logger.error(f"Claude理解和规划异常: {str(e)}\n{traceback.format_exc()}")
+            return {"success": False, "error": str(e)}
 
-    # ============= 复杂度分析层 =============
+    def _validate_claude_response(self, analysis: Dict[str, Any]) -> bool:
+        """验证Claude响应的完整性"""
+        try:
+            # 检查必要的顶级字段
+            required_top_fields = ["query_understanding", "execution_plan"]
+            for field in required_top_fields:
+                if field not in analysis:
+                    logger.error(f"Claude响应缺少字段: {field}")
+                    return False
 
-    async def _analyze_query_complexity(self, query: str, claude_analysis: Dict[str, Any],
-                                        gpt_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """分析查询复杂度并确定处理策略"""
+            # 检查query_understanding字段
+            understanding = analysis["query_understanding"]
+            required_understanding_fields = ["complexity", "query_type", "confidence"]
+            for field in required_understanding_fields:
+                if field not in understanding:
+                    logger.error(f"query_understanding缺少字段: {field}")
+                    return False
+
+            # 检查execution_plan字段
+            execution = analysis["execution_plan"]
+            required_execution_fields = ["api_calls", "needs_calculation"]
+            for field in required_execution_fields:
+                if field not in execution:
+                    logger.error(f"execution_plan缺少字段: {field}")
+                    return False
+
+            # 检查api_calls是否为列表
+            if not isinstance(execution["api_calls"], list):
+                logger.error("api_calls必须是列表")
+                return False
+
+            return True
+        except Exception as e:
+            logger.error(f"验证Claude响应时出错: {e}")
+            return False
+
+    def _extract_json_from_response(self, response_text: str) -> Optional[Dict[str, Any]]:
+        """从Claude响应中提取JSON"""
+        try:
+            # 直接尝试解析整个响应
+            return json.loads(response_text.strip())
+        except json.JSONDecodeError:
+            try:
+                # 尝试提取代码块中的JSON
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group(1))
+
+                # 尝试提取大括号中的内容
+                brace_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if brace_match:
+                    return json.loads(brace_match.group())
+
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+
+        logger.error(f"无法从响应中提取有效JSON: {response_text[:300]}")
+        return None
+
+    def _build_analysis_result(self, original_query: str, claude_plan: Dict[str, Any]) -> QueryAnalysisResult:
+        """构建分析结果"""
+        try:
+            plan_data = claude_plan["claude_plan"]
+            understanding = plan_data["query_understanding"]
+            execution = plan_data["execution_plan"]
+            time_info = plan_data.get("time_analysis", {})
+
+            # 🆕 增强API调用参数处理
+            api_calls = []
+            for api_call in execution.get("api_calls", []):
+                method = api_call.get("api_method", "get_system_data")
+                params = api_call.get("params", {})
+
+                # 🎯 处理日期参数格式转换
+                params = self._process_api_params(params)
+
+                api_calls.append({
+                    "method": method,
+                    "params": params,
+                    "reason": api_call.get("reason", "数据获取")
+                })
+
+            # 构建时间范围
+            time_range = None
+            if time_info.get("has_time_requirement"):
+                time_range = {
+                    "start_date": time_info.get("start_date"),
+                    "end_date": time_info.get("end_date"),
+                    "description": time_info.get("time_description", "")
+                }
+
+            # 安全地获取枚举值
+            complexity = self._safe_get_enum(QueryComplexity, understanding.get("complexity", "medium"))
+            query_type = self._safe_get_enum(QueryType, understanding.get("query_type", "data_retrieval"))
+            business_scenario = self._safe_get_enum(BusinessScenario,
+                                                    understanding.get("business_scenario", "daily_operations"))
+
+            return QueryAnalysisResult(
+                original_query=original_query,
+                complexity=complexity,
+                query_type=query_type,
+                business_scenario=business_scenario,
+                confidence_score=float(understanding.get("confidence", 0.75)),
+
+                # 核心执行信息
+                api_calls_needed=api_calls,
+                needs_calculation=execution.get("needs_calculation", False),
+                calculation_type=execution.get("calculation_type") if execution.get("needs_calculation") else None,
+
+                # 时间信息
+                time_range=time_range,
+
+                processing_metadata={
+                    "user_intent": understanding.get("user_intent", ""),
+                    "api_count": len(api_calls),
+                    "processing_method": "claude_integrated",
+                    "calculation_description": execution.get("calculation_description", "")
+                }
+            )
+        except Exception as e:
+            logger.error(f"构建分析结果失败: {e}\n{traceback.format_exc()}")
+            # 返回一个基本的结果
+            return QueryAnalysisResult(
+                original_query=original_query,
+                complexity=QueryComplexity.SIMPLE,
+                query_type=QueryType.DATA_RETRIEVAL,
+                business_scenario=BusinessScenario.DAILY_OPERATIONS,
+                confidence_score=0.5,
+                api_calls_needed=[{"method": "get_system_data", "params": {}, "reason": "降级数据获取"}],
+                processing_metadata={"error": str(e), "fallback": True}
+            )
+
+    def _safe_get_enum(self, enum_class, value: str):
+        """安全地获取枚举值"""
+        try:
+            return enum_class(value)
+        except ValueError:
+            logger.warning(f"无效的枚举值 {value} for {enum_class.__name__}, 使用默认值")
+            return list(enum_class)[0]  # 返回第一个枚举值作为默认
+
+    def _process_api_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """处理API参数，特别是日期格式"""
+        processed_params = params.copy()
+
+        # 处理日期参数
+        date_fields = ["date", "start_date", "end_date"]
+        for field in date_fields:
+            if field in processed_params and processed_params[field]:
+                processed_params[field] = self._convert_date_for_api(processed_params[field])
+
+        return processed_params
+
+    def _convert_date_for_api(self, date_str: str) -> str:
+        """将日期转换为API需要的YYYYMMDD格式"""
+        if not date_str:
+            return datetime.now().strftime('%Y%m%d')
 
         try:
-            logger.info("🔍 分析查询复杂度")
+            # 如果已经是YYYYMMDD格式
+            if len(date_str) == 8 and date_str.isdigit():
+                return date_str
 
-            # 从Claude分析中提取复杂度指标
-            claude_data = claude_analysis.get("claude_understanding", {})
-            if not isinstance(claude_data, dict):
-                claude_data = {}
-            business_logic = claude_data.get("business_logic_complexity", {})
-            if not isinstance(business_logic, dict):
-                business_logic = {}
-            analysis_requirements = claude_data.get("analysis_requirements", {})
-            if not isinstance(analysis_requirements, dict):
-                analysis_requirements = {}
+            # 如果是YYYY-MM-DD格式
+            if len(date_str) == 10 and '-' in date_str:
+                return date_str.replace('-', '')
 
-            # 从GPT分析中提取计算复杂度
-            gpt_data = gpt_analysis.get("gpt_analysis", {})
-            if not isinstance(gpt_data, dict):
-                gpt_data = {}
-            calculation_requirements = gpt_data.get("calculation_requirements", {})
-            if not isinstance(calculation_requirements, dict):
-                calculation_requirements = {}
-            processing_needs = gpt_data.get("data_processing_needs", {})
-            if not isinstance(processing_needs, dict):
-                processing_needs = {}
+            # 如果是其他格式，尝试解析
+            if self.date_utils:
+                # 使用date_utils进行智能转换
+                try:
+                    parsed_date = self.date_utils.api_format_to_date(date_str)
+                    return parsed_date.strftime('%Y%m%d')
+                except:
+                    pass
 
-            # 🎯 复杂度评分计算
-            complexity_score = 0
-            complexity_factors = []
-
-            # 1. 业务逻辑复杂度 (0-3分)
-            logic_level = business_logic.get("complexity_level", "simple")
-            if logic_level == "expert":
-                complexity_score += 3
-                complexity_factors.append("expert_business_logic")
-            elif logic_level == "complex":
-                complexity_score += 2
-                complexity_factors.append("complex_business_logic")
-            elif logic_level == "moderate":
-                complexity_score += 1
-                complexity_factors.append("moderate_business_logic")
-
-            # 2. 分析深度要求 (0-2分)
-            depth_level = analysis_requirements.get("depth_level", "overview")
-            if depth_level == "deep_modeling":
-                complexity_score += 2
-                complexity_factors.append("deep_modeling_required")
-            elif depth_level == "prediction":
-                complexity_score += 1.5
-                complexity_factors.append("prediction_analysis")
-            elif depth_level == "trend":
-                complexity_score += 1
-                complexity_factors.append("trend_analysis")
-
-            # 3. 计算复杂度 (0-2分)
-            calc_complexity = calculation_requirements.get("calculation_complexity", "simple")
-            if calc_complexity == "complex":
-                complexity_score += 2
-                complexity_factors.append("complex_calculations")
-            elif calc_complexity == "moderate":
-                complexity_score += 1
-                complexity_factors.append("moderate_calculations")
-
-            # 4. 数据处理需求 (0-2分)
-            if processing_needs.get("data_alignment_needed"):
-                complexity_score += 0.5
-                complexity_factors.append("data_alignment")
-            if processing_needs.get("outlier_detection_needed"):
-                complexity_score += 0.5
-                complexity_factors.append("outlier_detection")
-            if gpt_data.get("time_range_requirements", {}).get("historical_data_needed"):
-                complexity_score += 1
-                complexity_factors.append("historical_analysis")
-
-            # 5. 特殊需求 (0-1分)
-            if analysis_requirements.get("requires_forecasting"):
-                complexity_score += 1
-                complexity_factors.append("forecasting_required")
-            if analysis_requirements.get("requires_scenario_analysis"):
-                complexity_score += 0.5
-                complexity_factors.append("scenario_analysis")
-
-            # 🎯 确定最终复杂度等级
-            if complexity_score >= 6:
-                final_complexity = QueryComplexity.EXPERT
-            elif complexity_score >= 4:
-                final_complexity = QueryComplexity.COMPLEX
-            elif complexity_score >= 2:
-                final_complexity = QueryComplexity.MEDIUM
-            else:
-                final_complexity = QueryComplexity.SIMPLE
-
-            # 🎯 确定查询类型
-            query_type = self._determine_query_type(claude_data, gpt_data, query)
-
-            # 🎯 确定业务场景
-            business_scenario = self._determine_business_scenario(claude_data)
-
-            # 计算置信度
-            claude_confidence = claude_data.get("confidence_assessment", {}).get("understanding_confidence", 0.8)
-            gpt_success = gpt_analysis.get("success", False)
-            confidence_score = claude_confidence * (0.9 if gpt_success else 0.7)
-
-            return {
-                "complexity": final_complexity,
-                "complexity_score": complexity_score,
-                "complexity_factors": complexity_factors,
-                "query_type": query_type,
-                "business_scenario": business_scenario,
-                "confidence_score": confidence_score,
-                "analysis_metadata": {
-                    "claude_logic_complexity": logic_level,
-                    "gpt_calc_complexity": calc_complexity,
-                    "depth_requirement": depth_level,
-                    "total_complexity_indicators": len(complexity_factors)
-                }
-            }
+            # 默认返回今天
+            logger.warning(f"无法解析日期格式: {date_str}, 使用今天日期")
+            return datetime.now().strftime('%Y%m%d')
 
         except Exception as e:
-            logger.error(f"复杂度分析失败: {str(e)}")
-            # 降级到基础分析
-            return {
-                "complexity": QueryComplexity.MEDIUM,
-                "complexity_score": 2.0,
-                "complexity_factors": ["fallback_analysis"],
-                "query_type": QueryType.DATA_RETRIEVAL,
-                "business_scenario": BusinessScenario.DAILY_OPERATIONS,
-                "confidence_score": 0.5,
-                "analysis_metadata": {"fallback_reason": str(e)}
-            }
+            logger.error(f"日期转换失败: {date_str}, 错误: {e}")
+            return datetime.now().strftime('%Y%m%d')
 
-    def _determine_query_type(self, claude_data: Dict[str, Any],
-                              gpt_data: Dict[str, Any], query: str) -> QueryType:
-        """确定查询类型"""
+    # ============= 降级和工具方法 =============
 
-        # 从Claude分析中获取分析类型
-        if not isinstance(claude_data, dict):
-            claude_data = {}
-        analysis_requirements = claude_data.get("analysis_requirements", {})
-        if not isinstance(analysis_requirements, dict):
-            analysis_requirements = {}
-        analysis_type = analysis_requirements.get("analysis_type", "descriptive")
-        depth_level = analysis_requirements.get("depth_level", "overview")
+    async def _fallback_analysis(self, query: str, error: str = "") -> QueryAnalysisResult:
+        """降级分析：增强版基于规则的解析"""
+        logger.info(f"执行降级解析: {query[:50]}...")
+        self.processing_stats['fallback_parses'] += 1
 
-        # 从GPT分析中获取计算需求
-        requires_forecasting = analysis_requirements.get("requires_forecasting", False)
-        requires_scenario = analysis_requirements.get("requires_scenario_analysis", False)
-
-        # 基于模式匹配
         query_lower = query.lower()
 
-        # 优先级判断
-        if requires_forecasting or "预测" in query or "预计" in query:
-            return QueryType.PREDICTION
-        elif requires_scenario or "假设" in query or "如果" in query:
-            return QueryType.SCENARIO_SIMULATION
-        elif "对比" in query or "比较" in query or analysis_type == "comparative":
-            return QueryType.COMPARISON
-        elif "计算" in query or "复投" in query or "提现" in query:
-            return QueryType.CALCULATION
-        elif "风险" in query or "安全" in query or "可持续" in query:
-            return QueryType.RISK_ASSESSMENT
-        elif "趋势" in query or "增长" in query or depth_level == "trend":
-            return QueryType.TREND_ANALYSIS
-        else:
-            return QueryType.DATA_RETRIEVAL
-
-    def _determine_business_scenario(self, claude_data: Dict[str, Any]) -> BusinessScenario:
-        """确定业务场景"""
-
-        if not isinstance(claude_data, dict):
-            claude_data = {}
-        business_scenario = claude_data.get("business_scenario", {})
-        if not isinstance(business_scenario, dict):
-            business_scenario = {}
-        primary_scenario = business_scenario.get("primary_scenario", "")
-
-        scenario_mapping = {
-            "daily_operations": BusinessScenario.DAILY_OPERATIONS,
-            "financial_planning": BusinessScenario.FINANCIAL_PLANNING,
-            "risk_management": BusinessScenario.RISK_MANAGEMENT,
-            "growth_analysis": BusinessScenario.GROWTH_ANALYSIS,
-            "user_behavior": BusinessScenario.USER_BEHAVIOR,
-            "product_performance": BusinessScenario.PRODUCT_PERFORMANCE,
-            "compliance_check": BusinessScenario.COMPLIANCE_CHECK
-        }
-
-        return scenario_mapping.get(primary_scenario, BusinessScenario.DAILY_OPERATIONS)
-
-    # ============= 时间需求分析 =============
-
-    async def _analyze_time_requirements(self, query: str, claude_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """分析时间和日期需求"""
-
-        try:
-            logger.info("📅 分析时间需求")
-
-            # 使用date_utils进行AI日期解析
-            date_parse_result = await self.date_utils.parse_dates_from_query(query)
-
-            # 从Claude分析中获取时间相关信息
-            if not isinstance(claude_analysis, dict):
-                claude_analysis = {}
-            claude_data = claude_analysis.get("claude_understanding", {})
-            if not isinstance(claude_data, dict):
-                claude_data = {}
-            analysis_requirements = claude_data.get("analysis_requirements", {})
-            if not isinstance(analysis_requirements, dict):
-                analysis_requirements = {}
-
-            # 确定时间范围需求
-            if date_parse_result.has_time_info:
-                # 查询中明确包含时间信息
-                time_requirements = {
-                    "has_explicit_time": True,
-                    "parsed_dates": date_parse_result.dates,
-                    "parsed_ranges": [
-                        {
-                            "start_date": r.start_date,
-                            "end_date": r.end_date,
-                            "description": r.description
-                        }
-                        for r in date_parse_result.ranges
-                    ],
-                    "relative_terms": date_parse_result.relative_terms
-                }
-            else:
-                # 没有明确时间信息，需要推断
-                inferred_range = await self.date_utils.infer_optimal_time_range(query, "analysis")
-                time_requirements = {
-                    "has_explicit_time": False,
-                    "inferred_range": {
-                        "start_date": inferred_range.start_date,
-                        "end_date": inferred_range.end_date,
-                        "description": inferred_range.description
-                    }
-                }
-
-            # 分析时间复杂度
-            requires_historical = analysis_requirements.get("requires_forecasting", False)
-            depth_level = analysis_requirements.get("depth_level", "overview")
-
-            if depth_level in ["prediction", "deep_modeling"] or requires_historical:
-                time_requirements["complexity"] = "high"
-                time_requirements["min_historical_days"] = 90
-                time_requirements["optimal_historical_days"] = 180
-            elif depth_level == "trend":
-                time_requirements["complexity"] = "medium"
-                time_requirements["min_historical_days"] = 30
-                time_requirements["optimal_historical_days"] = 60
-            else:
-                time_requirements["complexity"] = "low"
-                time_requirements["min_historical_days"] = 7
-                time_requirements["optimal_historical_days"] = 30
-
-            return {
-                "success": True,
-                "time_requirements": time_requirements,
-                "date_parse_result": date_parse_result
-            }
-
-        except Exception as e:
-            logger.error(f"时间需求分析失败: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "fallback_time_requirements": {
-                    "has_explicit_time": False,
-                    "complexity": "medium",
-                    "min_historical_days": 30
-                }
-            }
-
-    # ============= 执行计划生成 =============
-
-    async def _generate_execution_plan(self, query: str, claude_analysis: Dict[str, Any],
-                                       gpt_analysis: Dict[str, Any],
-                                       complexity_analysis: Dict[str, Any]) -> List[ExecutionStep]:
-        """生成详细的执行计划"""
-
-        try:
-            logger.info("📋 生成执行计划")
-
-            complexity = complexity_analysis["complexity"]
-            query_type = complexity_analysis["query_type"]
-
-            execution_steps = []
-
-            # 🔥 根据复杂度和类型生成不同的执行计划
-            if complexity == QueryComplexity.SIMPLE:
-                execution_steps = self._generate_simple_execution_plan(query, claude_analysis, gpt_analysis)
-            elif complexity == QueryComplexity.MEDIUM:
-                execution_steps = self._generate_medium_execution_plan(query, claude_analysis, gpt_analysis)
-            elif complexity == QueryComplexity.COMPLEX:
-                execution_steps = self._generate_complex_execution_plan(query, claude_analysis, gpt_analysis)
-            else:  # EXPERT
-                execution_steps = self._generate_expert_execution_plan(query, claude_analysis, gpt_analysis)
-
-            # 为每个步骤添加依赖关系和时间估计
-            self._optimize_execution_plan(execution_steps)
-
-            logger.info(f"✅ 生成{len(execution_steps)}步执行计划")
-            return execution_steps
-
-        except Exception as e:
-            logger.error(f"执行计划生成失败: {str(e)}")
-            # 返回基础执行计划
-            return [
-                ExecutionStep(
-                    step_id="fallback_step",
-                    step_type="data_retrieval",
-                    description="基础数据获取",
-                    required_data=["system_data"],
-                    processing_method="direct_api_call",
-                    dependencies=[],
-                    estimated_time=3.0,
-                    ai_model_preference="gpt"
-                )
+        # 🆕 更详细的关键词判断
+        if any(kw in query_lower for kw in ["今天", "今日", "当前", "现在"]):
+            query_type = QueryType.DATA_RETRIEVAL
+            api_calls = [
+                {"method": "get_system_data", "params": {}, "reason": "获取当前系统数据"},
+                {"method": "get_daily_data", "params": {"date": datetime.now().strftime('%Y%m%d')},
+                 "reason": "获取今日数据"}
             ]
+            complexity = QueryComplexity.SIMPLE
+            scenario = BusinessScenario.DAILY_OPERATIONS
 
-    def _generate_simple_execution_plan(self, query: str, claude_analysis: Dict[str, Any],
-                                        gpt_analysis: Dict[str, Any]) -> List[ExecutionStep]:
-        """生成简单查询执行计划"""
-        return [
-            ExecutionStep(
-                step_id="simple_data_fetch",
-                step_type="data_retrieval",
-                description="获取当前数据",
-                required_data=["system_data"],
-                processing_method="single_api_call",
-                dependencies=[],
-                estimated_time=2.0,
-                ai_model_preference="gpt"
-            ),
-            ExecutionStep(
-                step_id="simple_format",
-                step_type="data_formatting",
-                description="格式化输出",
-                required_data=["system_data"],
-                processing_method="ai_formatting",
-                dependencies=["simple_data_fetch"],
-                estimated_time=1.0,
-                ai_model_preference="gpt"
-            )
-        ]
+        elif any(kw in query_lower for kw in ["余额", "总资产", "总金额", "资金"]):
+            query_type = QueryType.DATA_RETRIEVAL
+            api_calls = [{"method": "get_system_data", "params": {}, "reason": "获取资产概览"}]
+            complexity = QueryComplexity.SIMPLE
+            scenario = BusinessScenario.FINANCIAL_OVERVIEW
 
-    def _generate_medium_execution_plan(self, query: str, claude_analysis: Dict[str, Any],
-                                        gpt_analysis: Dict[str, Any]) -> List[ExecutionStep]:
-        """生成中等复杂度执行计划"""
-        return [
-            ExecutionStep(
-                step_id="medium_data_collection",
-                step_type="data_collection",
-                description="收集相关数据",
-                required_data=["system_data", "historical_data"],
-                processing_method="intelligent_data_fetch",
-                dependencies=[],
-                estimated_time=5.0,
-                ai_model_preference="api_connector"
-            ),
-            ExecutionStep(
-                step_id="medium_analysis",
-                step_type="trend_analysis",
-                description="趋势分析计算",
-                required_data=["historical_data"],
-                processing_method="time_series_analysis",
-                dependencies=["medium_data_collection"],
-                estimated_time=8.0,
-                ai_model_preference="gpt"
-            ),
-            ExecutionStep(
-                step_id="medium_insights",
-                step_type="insight_generation",
-                description="生成业务洞察",
-                required_data=["analysis_results"],
-                processing_method="ai_insight_generation",
-                dependencies=["medium_analysis"],
-                estimated_time=5.0,
-                ai_model_preference="claude"
-            )
-        ]
+        elif any(kw in query_lower for kw in ["产品", "到期", "持有"]):
+            query_type = QueryType.DATA_RETRIEVAL
+            if "到期" in query_lower:
+                api_calls = [
+                    {"method": "get_product_data", "params": {}, "reason": "获取产品信息"},
+                    {"method": "get_product_end_data", "params": {"date": datetime.now().strftime('%Y%m%d')},
+                     "reason": "获取今日到期产品"}
+                ]
+            else:
+                api_calls = [{"method": "get_product_data", "params": {}, "reason": "获取产品信息"}]
+            complexity = QueryComplexity.SIMPLE
+            scenario = BusinessScenario.PRODUCT_ANALYSIS
 
-    def _generate_complex_execution_plan(self, query: str, claude_analysis: Dict[str, Any],
-                                         gpt_analysis: Dict[str, Any]) -> List[ExecutionStep]:
-        """生成复杂查询执行计划"""
-        return [
-            ExecutionStep(
-                step_id="complex_planning",
-                step_type="analysis_planning",
-                description="分析策略规划",
-                required_data=["query_analysis"],
-                processing_method="ai_planning",
-                dependencies=[],
-                estimated_time=3.0,
-                ai_model_preference="claude"
-            ),
-            ExecutionStep(
-                step_id="complex_data_comprehensive",
-                step_type="comprehensive_data_collection",
-                description="综合数据获取",
-                required_data=["system_data", "historical_data", "product_data"],
-                processing_method="comprehensive_data_package",
-                dependencies=["complex_planning"],
-                estimated_time=10.0,
-                ai_model_preference="api_connector"
-            ),
-            ExecutionStep(
-                step_id="complex_preprocessing",
-                step_type="data_preprocessing",
-                description="数据预处理和清洗",
-                required_data=["raw_data"],
-                processing_method="time_series_building",
-                dependencies=["complex_data_comprehensive"],
-                estimated_time=8.0,
-                ai_model_preference="time_series_builder"
-            ),
-            ExecutionStep(
-                step_id="complex_analysis",
-                step_type="multi_dimensional_analysis",
-                description="多维度分析",
-                required_data=["processed_data"],
-                processing_method="dual_ai_analysis",
-                dependencies=["complex_preprocessing"],
-                estimated_time=15.0,
-                ai_model_preference="claude_gpt_collaboration"
-            ),
-            ExecutionStep(
-                step_id="complex_insights",
-                step_type="comprehensive_insight_generation",
-                description="综合洞察生成",
-                required_data=["analysis_results"],
-                processing_method="expert_insight_generation",
-                dependencies=["complex_analysis"],
-                estimated_time=10.0,
-                ai_model_preference="claude"
-            )
-        ]
-
-    def _generate_expert_execution_plan(self, query: str, claude_analysis: Dict[str, Any],
-                                        gpt_analysis: Dict[str, Any]) -> List[ExecutionStep]:
-        """生成专家级执行计划"""
-        return [
-            ExecutionStep(
-                step_id="expert_strategy_design",
-                step_type="strategic_planning",
-                description="专家级策略设计",
-                required_data=["query_analysis", "business_context"],
-                processing_method="ai_strategic_planning",
-                dependencies=[],
-                estimated_time=5.0,
-                ai_model_preference="claude"
-            ),
-            ExecutionStep(
-                step_id="expert_data_ecosystem",
-                step_type="data_ecosystem_building",
-                description="构建数据生态系统",
-                required_data=["all_available_data"],
-                processing_method="comprehensive_data_ecosystem",
-                dependencies=["expert_strategy_design"],
-                estimated_time=15.0,
-                ai_model_preference="api_connector"
-            ),
-            ExecutionStep(
-                step_id="expert_time_series",
-                step_type="advanced_time_series_analysis",
-                description="高级时间序列分析",
-                required_data=["historical_data"],
-                processing_method="multi_metric_time_series",
-                dependencies=["expert_data_ecosystem"],
-                estimated_time=12.0,
-                ai_model_preference="time_series_builder"
-            ),
-            ExecutionStep(
-                step_id="expert_modeling",
-                step_type="predictive_modeling",
-                description="预测建模分析",
-                required_data=["time_series_data"],
-                processing_method="advanced_financial_modeling",
-                dependencies=["expert_time_series"],
-                estimated_time=20.0,
-                ai_model_preference="gpt"
-            ),
-            ExecutionStep(
-                step_id="expert_scenario_analysis",
-                step_type="scenario_simulation",
-                description="场景模拟分析",
-                required_data=["model_results"],
-                processing_method="scenario_simulation",
-                dependencies=["expert_modeling"],
-                estimated_time=15.0,
-                ai_model_preference="financial_calculator"
-            ),
-            ExecutionStep(
-                step_id="expert_validation",
-                step_type="result_validation",
-                description="结果验证和质量检查",
-                required_data=["all_results"],
-                processing_method="ai_validation",
-                dependencies=["expert_scenario_analysis"],
-                estimated_time=8.0,
-                ai_model_preference="claude_gpt_collaboration"
-            ),
-            ExecutionStep(
-                step_id="expert_insights",
-                step_type="expert_insight_synthesis",
-                description="专家级洞察综合",
-                required_data=["validated_results"],
-                processing_method="expert_insight_synthesis",
-                dependencies=["expert_validation"],
-                estimated_time=12.0,
-                ai_model_preference="claude"
-            )
-        ]
-
-    def _optimize_execution_plan(self, execution_steps: List[ExecutionStep]):
-        """优化执行计划"""
-
-        # 检查并行执行可能性
-        for i, step in enumerate(execution_steps):
-            # 检查是否可以与前面的步骤并行
-            if i > 0:
-                previous_step = execution_steps[i - 1]
-                if (step.step_type != previous_step.step_type and
-                        len(set(step.required_data) & set(previous_step.required_data)) == 0):
-                    # 可能可以并行执行，标记为可优化
-                    if step.step_id not in previous_step.dependencies:
-                        step.estimated_time *= 0.8  # 并行执行时间优化
-
-    # ============= AI协作策略设计 =============
-
-    def _design_ai_collaboration(self, complexity_analysis: Dict[str, Any],
-                                 execution_plan: List[ExecutionStep]) -> Dict[str, Any]:
-        """设计AI协作策略"""
-
-        complexity = complexity_analysis["complexity"]
-        query_type = complexity_analysis["query_type"]
-
-        # 🤖 根据复杂度和类型设计协作策略
-        if complexity == QueryComplexity.SIMPLE:
-            collaboration_plan = {
-                "strategy_type": "single_ai",
-                "primary_ai": "gpt",
-                "collaboration_level": "minimal",
-                "handoff_points": [],
-                "quality_gates": ["basic_validation"]
-            }
-        elif complexity == QueryComplexity.MEDIUM:
-            collaboration_plan = {
-                "strategy_type": "sequential_collaboration",
-                "primary_ai": "gpt",
-                "secondary_ai": "claude",
-                "collaboration_level": "moderate",
-                "handoff_points": ["after_calculation", "before_insight_generation"],
-                "quality_gates": ["data_validation", "logic_validation"]
-            }
-        elif complexity == QueryComplexity.COMPLEX:
-            collaboration_plan = {
-                "strategy_type": "parallel_collaboration",
-                "primary_ai": "claude",
-                "secondary_ai": "gpt",
-                "collaboration_level": "high",
-                "handoff_points": ["strategy_planning", "data_analysis", "insight_synthesis"],
-                "quality_gates": ["strategy_validation", "calculation_validation", "insight_validation"]
-            }
-        else:  # EXPERT
-            collaboration_plan = {
-                "strategy_type": "deep_collaboration",
-                "primary_ai": "claude",
-                "secondary_ai": "gpt",
-                "collaboration_level": "expert",
-                "handoff_points": ["strategic_planning", "data_modeling", "scenario_analysis", "result_validation",
-                                   "insight_synthesis"],
-                "quality_gates": ["strategy_gate", "modeling_gate", "scenario_gate", "validation_gate", "insight_gate"]
-            }
-
-        # 添加具体的AI任务分配
-        collaboration_plan["ai_task_allocation"] = self._allocate_ai_tasks(execution_plan)
-
-        return collaboration_plan
-
-    def _allocate_ai_tasks(self, execution_plan: List[ExecutionStep]) -> Dict[str, List[str]]:
-        """分配AI任务"""
-
-        claude_tasks = []
-        gpt_tasks = []
-
-        for step in execution_plan:
-            if step.ai_model_preference in ["claude", "claude_gpt_collaboration"]:
-                claude_tasks.append(step.step_id)
-            elif step.ai_model_preference == "gpt":
-                gpt_tasks.append(step.step_id)
-
-        return {
-            "claude_tasks": claude_tasks,
-            "gpt_tasks": gpt_tasks,
-            "collaborative_tasks": [
-                step.step_id for step in execution_plan
-                if step.ai_model_preference == "claude_gpt_collaboration"
+        elif any(kw in query_lower for kw in ["用户", "注册", "活跃"]):
+            query_type = QueryType.DATA_RETRIEVAL
+            api_calls = [
+                {"method": "get_user_daily_data", "params": {"date": datetime.now().strftime('%Y%m%d')},
+                 "reason": "获取用户数据"}
             ]
-        }
+            complexity = QueryComplexity.SIMPLE
+            scenario = BusinessScenario.USER_ANALYSIS
 
-    # ============= 结果构建和辅助方法 =============
+        elif any(kw in query_lower for kw in ["趋势", "增长", "变化", "历史"]):
+            query_type = QueryType.TREND_ANALYSIS
+            api_calls = [
+                {"method": "get_system_data", "params": {}, "reason": "获取基础数据进行趋势分析"},
+                {"method": "get_daily_data", "params": {"date": datetime.now().strftime('%Y%m%d')},
+                 "reason": "获取今日数据"}
+            ]
+            complexity = QueryComplexity.MEDIUM
+            scenario = BusinessScenario.HISTORICAL_PERFORMANCE
 
-    def _build_analysis_result(self, original_query: str, preprocessed_query: str,
-                               claude_analysis: Dict[str, Any], gpt_analysis: Dict[str, Any],
-                               complexity_analysis: Dict[str, Any], time_analysis: Dict[str, Any],
-                               execution_plan: List[ExecutionStep],
-                               ai_collaboration_plan: Dict[str, Any]) -> QueryAnalysisResult:
-        """构建最终分析结果"""
+        elif any(kw in query_lower for kw in ["预测", "预计", "未来", "预期"]):
+            query_type = QueryType.PREDICTION
+            api_calls = [{"method": "get_system_data", "params": {}, "reason": "获取数据进行预测"}]
+            complexity = QueryComplexity.COMPLEX
+            scenario = BusinessScenario.FUTURE_PROJECTION
 
-        # 计算总预估时间
-        total_estimated_time = sum(step.estimated_time for step in execution_plan)
+        elif any(kw in query_lower for kw in ["风险", "安全", "危险"]):
+            query_type = QueryType.RISK_ASSESSMENT
+            api_calls = [{"method": "get_system_data", "params": {}, "reason": "获取数据进行风险评估"}]
+            complexity = QueryComplexity.COMPLEX
+            scenario = BusinessScenario.RISK_MANAGEMENT
 
-        # 提取数据需求
-        gpt_data = gpt_analysis.get("gpt_analysis", {})
-        if not isinstance(gpt_data, dict):
-            gpt_data = {}
-        data_requirements = gpt_data.get("required_data_sources", {})
-        if not isinstance(data_requirements, dict):
-            data_requirements = {}
-        required_apis = data_requirements.get("primary_apis", []) + data_requirements.get("secondary_apis", [])
-
-        # 提取业务参数
-        claude_data = claude_analysis.get("claude_understanding", {})
-        if not isinstance(claude_data, dict):
-            claude_data = {}
-        business_parameters = claude_data.get("key_business_parameters", {})
-        if not isinstance(business_parameters, dict):
-            business_parameters = {}
-        calculation_requirements = gpt_data.get("calculation_requirements", {})
-        if not isinstance(calculation_requirements, dict):
-            calculation_requirements = {}
-
-        # 确定处理策略
-        complexity = complexity_analysis["complexity"]
-        if complexity == QueryComplexity.SIMPLE:
-            processing_strategy = "direct_processing"
-        elif complexity == QueryComplexity.MEDIUM:
-            processing_strategy = "standard_analysis_pipeline"
-        elif complexity == QueryComplexity.COMPLEX:
-            processing_strategy = "comprehensive_analysis_pipeline"
         else:
-            processing_strategy = "expert_analysis_pipeline"
-
-        return QueryAnalysisResult(
-            original_query=original_query,
-            complexity=complexity_analysis["complexity"],
-            query_type=complexity_analysis["query_type"],
-            business_scenario=complexity_analysis["business_scenario"],
-            confidence_score=complexity_analysis["confidence_score"],
-
-            time_requirements=time_analysis.get("time_requirements", {}),
-            date_parse_result=time_analysis.get("date_parse_result"),
-
-            data_requirements=data_requirements,
-            required_apis=required_apis,
-
-            business_parameters=business_parameters,
-            calculation_requirements=calculation_requirements,
-
-            execution_plan=execution_plan,
-            processing_strategy=processing_strategy,
-
-            ai_collaboration_plan=ai_collaboration_plan,
-
-            analysis_timestamp=datetime.now().isoformat(),
-            estimated_total_time=total_estimated_time,
-            processing_metadata={
-                "claude_analysis_success": claude_analysis.get("success", False),
-                "gpt_analysis_success": gpt_analysis.get("success", False),
-                "complexity_factors": complexity_analysis.get("complexity_factors", []),
-                "total_execution_steps": len(execution_plan),
-                "ai_collaboration_level": ai_collaboration_plan.get("collaboration_level", "minimal")
-            }
-        )
-
-    async def _preprocess_query(self, query: str) -> str:
-        """预处理查询文本"""
-
-        # 基础清理
-        cleaned_query = query.strip()
-
-        # 移除多余空格
-        cleaned_query = re.sub(r'\s+', ' ', cleaned_query)
-
-        # 标准化常见术语
-        replacements = {
-            '複投': '复投',
-            '現金': '现金',
-            '資金': '资金',
-            '預測': '预测',
-            '預計': '预计'
-        }
-
-        for old, new in replacements.items():
-            cleaned_query = cleaned_query.replace(old, new)
-
-        return cleaned_query
-
-    async def _fallback_query_understanding(self, query: str) -> Dict[str, Any]:
-        """降级查询理解"""
-
-        # 基于模式匹配的基础理解
-        understanding = {
-            "business_intent": {
-                "primary_goal": "数据查询",
-                "urgency_level": "medium"
-            },
-            "business_scenario": {
-                "primary_scenario": "daily_operations",
-                "scenario_confidence": 0.6
-            },
-            "analysis_requirements": {
-                "depth_level": "overview",
-                "analysis_type": "descriptive"
-            },
-            "business_logic_complexity": {
-                "complexity_level": "simple",
-                "reasoning_steps": 1
-            },
-            "confidence_assessment": {
-                "understanding_confidence": 0.6,
-                "clarity_score": 0.7
-            }
-        }
-
-        return {
-            "success": True,
-            "claude_understanding": understanding,
-            "processing_method": "fallback_pattern_matching"
-        }
-
-    def _fallback_data_requirements_analysis(self, query: str, claude_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """降级数据需求分析"""
-
-        # 基础数据需求推断
-        analysis = {
-            "required_data_sources": {
-                "primary_apis": ["system"],
-                "data_freshness_requirements": "daily"
-            },
-            "calculation_requirements": {
-                "basic_calculations": ["basic_stats"],
-                "calculation_complexity": "simple"
-            },
-            "data_processing_needs": {
-                "data_cleaning_required": True,
-                "missing_data_handling": "ignore"
-            }
-        }
-
-        return {
-            "success": True,
-            "gpt_analysis": analysis,
-            "processing_method": "fallback_basic_requirements"
-        }
-
-    def _create_error_analysis_result(self, query: str, error: str) -> QueryAnalysisResult:
-        """创建错误分析结果"""
-
-        error_execution_plan = [
-            ExecutionStep(
-                step_id="error_handling",
-                step_type="error_response",
-                description=f"处理解析错误: {error}",
-                required_data=[],
-                processing_method="error_handling",
-                dependencies=[],
-                estimated_time=1.0,
-                ai_model_preference="system"
-            )
-        ]
+            # 默认情况
+            query_type = QueryType.DATA_RETRIEVAL
+            api_calls = [{"method": "get_system_data", "params": {}, "reason": "获取系统概览"}]
+            complexity = QueryComplexity.SIMPLE
+            scenario = BusinessScenario.DAILY_OPERATIONS
 
         return QueryAnalysisResult(
             original_query=query,
-            complexity=QueryComplexity.SIMPLE,
-            query_type=QueryType.DATA_RETRIEVAL,
-            business_scenario=BusinessScenario.DAILY_OPERATIONS,
-            confidence_score=0.0,
-
-            time_requirements={},
-            date_parse_result=None,
-
-            data_requirements={},
-            required_apis=[],
-
-            business_parameters={},
-            calculation_requirements={},
-
-            execution_plan=error_execution_plan,
-            processing_strategy="error_handling",
-
-            ai_collaboration_plan={"strategy_type": "error_handling"},
-
-            analysis_timestamp=datetime.now().isoformat(),
-            estimated_total_time=1.0,
-            processing_metadata={"error": error}
+            complexity=complexity,
+            query_type=query_type,
+            business_scenario=scenario,
+            confidence_score=0.6,  # 降级解析置信度较低
+            api_calls_needed=api_calls,
+            needs_calculation=query_type in [QueryType.TREND_ANALYSIS, QueryType.PREDICTION, QueryType.CALCULATION],
+            calculation_type="statistics" if query_type == QueryType.TREND_ANALYSIS else
+            "prediction" if query_type == QueryType.PREDICTION else
+            "calculation" if query_type == QueryType.CALCULATION else None,
+            processing_metadata={
+                "parsing_method": "fallback_rule_based",
+                "fallback_reason": error or "Claude分析不可用",
+                "keywords_matched": [kw for kw in ["今天", "余额", "产品", "用户", "趋势", "预测"] if kw in query_lower]
+            }
         )
+
+    def _preprocess_query(self, query: str) -> str:
+        """预处理查询文本"""
+        # 基础清理
+        cleaned = query.strip()
+        # 移除多余空格
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        # 标准化常见术语
+        replacements = {
+            '複投': '复投', '現金': '现金', '資金': '资金',
+            '預測': '预测', '預計': '预计', '餘額': '余额'
+        }
+        for old, new in replacements.items():
+            cleaned = cleaned.replace(old, new)
+        return cleaned
 
     def _update_processing_stats(self, result: QueryAnalysisResult):
         """更新处理统计"""
+        self.processing_stats['successful_parses'] += 1
 
-        self.processing_stats['complexity_distribution'][result.complexity.value] += 1
+        # 更新复杂度分布
+        complexity_key = result.complexity.value
+        self.processing_stats['complexity_distribution'][complexity_key] += 1
 
+        # 更新查询类型分布
         query_type_key = result.query_type.value
         if query_type_key not in self.processing_stats['query_type_distribution']:
             self.processing_stats['query_type_distribution'][query_type_key] = 0
         self.processing_stats['query_type_distribution'][query_type_key] += 1
 
-        if result.ai_collaboration_plan.get("collaboration_level") in ["high", "expert"]:
-            self.processing_stats['ai_collaboration_usage'] += 1
-
         # 更新平均置信度
         total = self.processing_stats['total_queries']
         current_avg = self.processing_stats['average_confidence']
-        new_avg = (current_avg * (total - 1) + result.confidence_score) / total
-        self.processing_stats['average_confidence'] = new_avg
+        self.processing_stats['average_confidence'] = (
+                (current_avg * (total - 1) + result.confidence_score) / total
+        )
 
-    # ============= 工具方法 =============
+    # ============= 外部接口 =============
 
     def get_processing_stats(self) -> Dict[str, Any]:
         """获取处理统计信息"""
-        return self.processing_stats.copy()
+        stats = self.processing_stats.copy()
+        total = stats['total_queries']
+        if total > 0:
+            stats['success_rate'] = stats['successful_parses'] / total
+            stats['fallback_rate'] = stats['fallback_parses'] / total
+            stats['claude_failure_rate'] = stats['claude_failures'] / total
+        else:
+            stats['success_rate'] = 0.0
+            stats['fallback_rate'] = 0.0
+            stats['claude_failure_rate'] = 0.0
+        return stats
 
     async def validate_query(self, query: str) -> Dict[str, Any]:
         """验证查询有效性"""
-
         if not query or len(query.strip()) == 0:
             return {"valid": False, "error": "查询为空"}
 
         if len(query) > 1000:
-            return {"valid": False, "error": "查询过长"}
+            return {"valid": False, "error": "查询过长（超过1000字符）"}
 
-        # 使用validation_utils验证
-        if self.validator:
-            validation_result = await self.validator.validate_data(
-                {"query": query}, "query_data"
-            )
-            return {
-                "valid": validation_result.is_valid,
-                "validation_details": validation_result
-            }
+        # 检查是否包含有意义的内容
+        if len(query.strip()) < 2:
+            return {"valid": False, "error": "查询内容过短"}
 
         return {"valid": True}
+
+    async def health_check(self) -> Dict[str, Any]:
+        """健康检查"""
+        status = "healthy"
+        issues = []
+
+        if not self.claude_client:
+            status = "degraded"
+            issues.append("Claude客户端未配置")
+
+        # 检查统计信息是否健康
+        stats = self.get_processing_stats()
+        if stats['total_queries'] > 10:  # 有足够样本时检查
+            if stats['claude_failure_rate'] > 0.5:  # Claude失败率超过50%
+                status = "degraded"
+                issues.append("Claude失败率过高")
+
+            if stats['fallback_rate'] > 0.8:  # 降级率超过80%
+                status = "degraded"
+                issues.append("降级解析率过高")
+
+        return {
+            "status": status,
+            "claude_available": self.claude_client is not None,
+            "date_utils_available": self.date_utils is not None,
+            "processing_stats": stats,
+            "issues": issues,
+            "timestamp": datetime.now().isoformat()
+        }
 
 
 # ============= 工厂函数 =============
 
-def create_smart_query_parser(claude_client=None, gpt_client=None) -> SmartQueryParser:
+def create_smart_query_parser(claude_client: Optional[ClaudeClient] = None,
+                              gpt_client=None) -> SmartQueryParser:
     """
     创建智能查询解析器实例
 
     Args:
         claude_client: Claude客户端实例
-        gpt_client: GPT客户端实例
+        gpt_client: 保留兼容性，但不再使用
 
     Returns:
-        SmartQueryParser: 智能查询解析器实例
+        SmartQueryParser: 重构后的查询解析器实例
     """
     return SmartQueryParser(claude_client, gpt_client)
 
 
 # ============= 使用示例 =============
 
-async def main():
+async def example_usage():
     """使用示例"""
+    from core.models.claude_client import ClaudeClient
 
-    # 创建查询解析器
-    parser = create_smart_query_parser()
+    # 创建解析器（需要实际的Claude客户端）
+    claude_client = ClaudeClient()  # 需要配置API密钥
+    parser = create_smart_query_parser(claude_client)
 
-    print("=== 智能查询解析器测试 ===")
-
-    # 测试不同复杂度的查询
+    # 测试查询
     test_queries = [
-        "今天系统总余额是多少？",  # Simple
-        "过去30天每日入金趋势如何？",  # Medium
-        "根据过去3个月增长预测7月份如果30%复投的资金情况",  # Expert
-        "假设无入金情况下公司还能运行多久？"  # Complex
+        "今天的总余额是多少？",  # Simple
+        "过去30天的用户增长趋势如何？",  # Medium with time range
+        "基于历史数据预测下个月的资金缺口",  # Complex
+        "明天有哪些产品到期？",  # Product expiry
+        "当前用户活跃度情况"  # User analysis
     ]
 
-    for i, query in enumerate(test_queries, 1):
-        print(f"\n--- 测试查询 {i} ---")
-        print(f"查询: {query}")
+    for query in test_queries:
+        print(f"\n测试查询: {query}")
 
         # 验证查询
         validation = await parser.validate_query(query)
-        print(f"验证: {'通过' if validation['valid'] else '失败'}")
+        if not validation['valid']:
+            print(f"验证失败: {validation['error']}")
+            continue
 
-        if validation['valid']:
-            # 解析查询
-            result = await parser.parse_complex_query(query)
-            print(f"复杂度: {result.complexity.value}")
-            print(f"类型: {result.query_type.value}")
-            print(f"场景: {result.business_scenario.value}")
-            print(f"置信度: {result.confidence_score:.2f}")
-            print(f"执行步骤: {len(result.execution_plan)}步")
-            print(f"预估时间: {result.estimated_total_time:.1f}秒")
+        # 解析查询
+        result = await parser.parse_complex_query(query)
+        print(f"类型: {result.query_type.value}")
+        print(f"复杂度: {result.complexity.value}")
+        print(f"场景: {result.business_scenario.value}")
+        print(f"API调用: {len(result.api_calls_needed)}个")
+        for api_call in result.api_calls_needed:
+            print(f"  - {api_call['method']}({api_call['params']}) - {api_call['reason']}")
+        print(f"需要计算: {result.needs_calculation}")
+        if result.needs_calculation:
+            print(f"计算类型: {result.calculation_type}")
+        print(f"置信度: {result.confidence_score:.2f}")
+        print(f"处理方法: {result.processing_metadata.get('processing_method', 'N/A')}")
 
-    # 统计信息
+    # 显示统计信息
     stats = parser.get_processing_stats()
     print(f"\n=== 处理统计 ===")
     print(f"总查询数: {stats['total_queries']}")
+    print(f"成功率: {stats['success_rate']:.1%}")
+    print(f"降级率: {stats['fallback_rate']:.1%}")
+    print(f"Claude失败率: {stats['claude_failure_rate']:.1%}")
     print(f"平均置信度: {stats['average_confidence']:.2f}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 运行示例
+    asyncio.run(example_usage())

@@ -106,7 +106,7 @@ class ClaudeClient:
         # 设置模型和参数
         self.model = "claude-sonnet-4-20250514"  # 使用最新的Claude 4模型
         self.max_tokens = 8000
-        self.max_retries = 3  # 最大重试次数
+        self.max_retries = 1  # 最大重试次数
         self.retry_delay = 2  # 初始重试延迟（秒）
         
         logger.info(f"ClaudeClient initialized successfully")
@@ -679,4 +679,103 @@ class ClaudeClient:
                 "requires_visualization": False,
                 "key_entities": [],
                 "key_metrics": []
+            }
+
+    async def generate_text(self, prompt: str, max_tokens: int = 1500, system_prompt: str = None) -> Dict[str, Any]:
+        """
+        生成文本响应 - 为IntelligentQAOrchestrator提供的通用文本生成方法
+        根据可用的API方法（messages API或completion API）动态选择调用方式
+        
+        Args:
+            prompt: 用户提示词
+            max_tokens: 最大生成token数
+            system_prompt: 可选的系统提示词
+            
+        Returns:
+            包含生成文本的字典，格式为 {"success": bool, "text": str, ...}
+        """
+        logger.info(f"使用Claude生成文本响应，模型: {self.model}, 最大tokens: {max_tokens}")
+        
+        try:
+            # 尝试使用messages API（优先）
+            if self.has_messages_api:
+                logger.debug("使用messages API生成文本")
+                messages = [{"role": "user", "content": prompt}]
+                
+                # 如果提供了系统提示词
+                message_kwargs = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "messages": messages
+                }
+                
+                if system_prompt:
+                    message_kwargs["system"] = system_prompt
+                
+                # messages.create是同步的，使用asyncio.to_thread运行
+                response = await asyncio.to_thread(
+                    self.client.messages.create,
+                    **message_kwargs
+                )
+                
+                # 提取文本内容
+                content_text = ""
+                if hasattr(response, 'content') and response.content:
+                    for content_item in response.content:
+                        if hasattr(content_item, 'text'):
+                            content_text += content_item.text
+                
+                return {
+                    "success": True,
+                    "text": content_text,
+                    "model_used": self.model,
+                    "api_method": "messages"
+                }
+            
+            # 尝试使用completion API（备选）
+            elif self.has_completion_api:
+                logger.debug("使用completion API生成文本")
+                # 构建提示词
+                if system_prompt:
+                    full_prompt = f"{system_prompt}\n\n{prompt}"
+                else:
+                    full_prompt = prompt
+                
+                # completion是同步的，使用asyncio.to_thread运行
+                response = await asyncio.to_thread(
+                    self.client.completion,
+                    prompt=full_prompt,
+                    model=self.model,
+                    max_tokens_to_sample=max_tokens
+                )
+                
+                # 提取文本内容
+                completion_text = response.completion if hasattr(response, 'completion') else str(response)
+                
+                return {
+                    "success": True,
+                    "text": completion_text,
+                    "model_used": self.model,
+                    "api_method": "completion"
+                }
+            
+            # 两种API方法都不可用
+            else:
+                error_msg = "Claude客户端没有可用的API方法（messages或completion）"
+                logger.error(error_msg)
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "text": "AI服务暂时不可用，请稍后再试。",
+                    "model_used": self.model
+                }
+                
+        except Exception as e:
+            error_msg = f"Claude生成文本时发生错误: {str(e)}"
+            logger.error(f"{error_msg}\n{traceback.format_exc()}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "text": f"AI处理遇到问题: {str(e)}",
+                "model_used": self.model
             }
