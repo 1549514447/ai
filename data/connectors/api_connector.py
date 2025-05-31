@@ -307,6 +307,72 @@ class APIConnector:
 
     # ============= 🆕 新增第8个API方法 =============
 
+    async def intelligent_data_fetch_enhanced(self, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        🧠 增强版智能数据获取 - 基于Claude的精确分析
+        """
+        try:
+            logger.info("🧠 开始增强版智能数据获取")
+
+            api_calls = query_analysis.get("execution_plan", {}).get("api_calls", [])
+            time_entities = query_analysis.get("query_understanding", {}).get("time_entities", [])
+
+            # 按优先级排序API调用
+            sorted_calls = sorted(api_calls, key=lambda x: x.get("priority", 999))
+
+            # 并行执行API调用
+            tasks = []
+            task_metadata = []
+
+            for api_call in sorted_calls:
+                method = api_call.get("api_method")
+                params = api_call.get("params", {})
+
+                # 动态调用对应的方法
+                if hasattr(self, method):
+                    api_method = getattr(self, method)
+                    if params:
+                        task = api_method(**params)
+                    else:
+                        task = api_method()
+                    tasks.append(task)
+                    task_metadata.append({
+                        "method": method,
+                        "params": params,
+                        "reason": api_call.get("reason", "")
+                    })
+
+            # 执行所有API调用
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # 整理结果
+            organized_data = {}
+            for i, (result, metadata) in enumerate(zip(results, task_metadata)):
+                if not isinstance(result, Exception) and result.get("success"):
+                    organized_data[metadata["method"]] = {
+                        "data": result.get("data"),
+                        "metadata": metadata,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                else:
+                    logger.error(f"API调用失败: {metadata['method']}, 错误: {result}")
+
+            return {
+                "success": True,
+                "data_type": "intelligent_package",
+                "organized_data": organized_data,
+                "query_analysis": query_analysis,
+                "execution_summary": {
+                    "total_api_calls": len(tasks),
+                    "successful_calls": len(organized_data),
+                    "failed_calls": len(tasks) - len(organized_data)
+                },
+                "package_timestamp": datetime.now().isoformat()
+            }
+
+        except Exception as e:
+            logger.error(f"❌ 增强版智能数据获取失败: {str(e)}")
+            return await self._fetch_basic_data_package()
     async def get_product_end_interval(self, start_date: str, end_date: str) -> Dict[str, Any]:
         """
         🆕 获取区间产品到期数据 - 第8个API

@@ -408,7 +408,171 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Failed to get user conversations for user_id {user_id}: {str(e)}")
             return []
-            
+
+    # 在 ConversationManager 类中添加以下方法
+
+    def delete_conversation(self, conversation_id: Union[int, str]) -> bool:
+        """
+        删除指定的对话（包括所有关联的消息和可视化元素）
+
+        Args:
+            conversation_id: 对话ID，可以是整数或字符串
+
+        Returns:
+            bool: 删除是否成功
+        """
+        # 确保conversation_id是整数类型
+        if isinstance(conversation_id, str):
+            try:
+                conversation_id = int(conversation_id)
+            except ValueError:
+                logger.error(f"Invalid conversation_id format for deletion: {conversation_id}")
+                return False
+
+        logger.info(f"Attempting to delete conversation {conversation_id}")
+
+        if not self.db:
+            # 内存模式：直接从内存中删除
+            if conversation_id not in self._memory_conversations:
+                logger.warning(f"Conversation {conversation_id} not found in memory for deletion")
+                return False
+
+            try:
+                # 删除对话相关的消息
+                if conversation_id in self._memory_messages:
+                    del self._memory_messages[conversation_id]
+
+                # 删除对话记录
+                del self._memory_conversations[conversation_id]
+
+                logger.info(f"Successfully deleted conversation {conversation_id} from memory")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete conversation {conversation_id} from memory: {str(e)}")
+                return False
+
+        try:
+            # 数据库模式：由于设置了外键级联删除，只需删除 conversations 记录
+            # messages 和 message_visuals 会自动级联删除
+            query = "DELETE FROM conversations WHERE id = %s"
+            affected_rows = self.db.execute_update(query, (conversation_id,))
+
+            if affected_rows > 0:
+                logger.info(f"Successfully deleted conversation {conversation_id} from database")
+                return True
+            else:
+                logger.warning(f"Conversation {conversation_id} not found in database for deletion")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to delete conversation {conversation_id} from database: {str(e)}")
+            return False
+
+    def update_conversation_title(self, conversation_id: Union[int, str], new_title: str) -> bool:
+        """
+        更新对话标题
+
+        Args:
+            conversation_id: 对话ID，可以是整数或字符串
+            new_title: 新的对话标题
+
+        Returns:
+            bool: 更新是否成功
+        """
+        # 确保conversation_id是整数类型
+        if isinstance(conversation_id, str):
+            try:
+                conversation_id = int(conversation_id)
+            except ValueError:
+                logger.error(f"Invalid conversation_id format for title update: {conversation_id}")
+                return False
+
+        # 验证新标题
+        if not new_title or not new_title.strip():
+            logger.error("New title cannot be empty")
+            return False
+
+        new_title = new_title.strip()
+        if len(new_title) > 255:  # 根据数据库字段长度限制
+            new_title = new_title[:252] + "..."
+            logger.warning(f"Title truncated to 255 characters for conversation {conversation_id}")
+
+        logger.info(f"Attempting to update title for conversation {conversation_id} to: {new_title}")
+
+        if not self.db:
+            # 内存模式：直接更新内存中的标题
+            if conversation_id not in self._memory_conversations:
+                logger.warning(f"Conversation {conversation_id} not found in memory for title update")
+                return False
+
+            try:
+                self._memory_conversations[conversation_id]['title'] = new_title
+                self._memory_conversations[conversation_id]['updated_at'] = datetime.now()
+
+                logger.info(f"Successfully updated title for conversation {conversation_id} in memory")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update title for conversation {conversation_id} in memory: {str(e)}")
+                return False
+
+        try:
+            # 数据库模式：更新数据库中的标题
+            query = """
+                UPDATE conversations 
+                SET title = %s, updated_at = NOW() 
+                WHERE id = %s
+            """
+            affected_rows = self.db.execute_update(query, (new_title, conversation_id))
+
+            if affected_rows > 0:
+                logger.info(f"Successfully updated title for conversation {conversation_id} in database")
+                return True
+            else:
+                logger.warning(f"Conversation {conversation_id} not found in database for title update")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to update title for conversation {conversation_id} in database: {str(e)}")
+            return False
+
+    def get_recent_messages(self, conversation_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        获取对话的最近消息（用于重复检查等）
+
+        Args:
+            conversation_id: 对话ID
+            limit: 获取的消息数量限制
+
+        Returns:
+            List[Dict[str, Any]]: 最近的消息列表
+        """
+        if not self.db:
+            # 内存模式
+            if conversation_id not in self._memory_conversations:
+                return []
+
+            messages = self._memory_messages.get(conversation_id, [])
+            # 返回最后N条消息
+            return messages[-limit:] if messages else []
+
+        try:
+            query = """
+                SELECT id, conversation_id, is_user, content, created_at, 
+                       ai_model_used, ai_strategy, processing_time, confidence_score
+                FROM messages
+                WHERE conversation_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+            """
+            messages = self.db.execute_query(query, (conversation_id, limit))
+
+            # 转换 is_user 从 tinyint 到 bool，并反转顺序（最新的在后面）
+            for msg in messages:
+                msg['is_user'] = bool(msg.get('is_user'))
+
+            return list(reversed(messages))  # 反转，使最新的在后面
+        except Exception as e:
+            logger.error(f"Failed to get recent messages for conversation {conversation_id}: {str(e)}")
+            return []
+
     def count_user_conversations(self, user_id: int) -> int:
         """
         获取指定用户角色的对话总数。

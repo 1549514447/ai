@@ -317,7 +317,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=3500,
+                max_tokens=5500,
                 messages=[{"role": "user", "content": decomposition_prompt}]
             )
             result_text = message.content[0].text
@@ -408,7 +408,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=3000,
+                max_tokens=5000,
                 messages=[{"role": "user", "content": insight_prompt}]
             )
             insights_text = message.content[0].text
@@ -470,7 +470,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=3500,
+                max_tokens=5500,
                 messages=[{"role": "user", "content": complexity_prompt}]
             )
             complexity_result_text = message.content[0].text
@@ -540,7 +540,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=5000,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_content}]
             )
@@ -606,7 +606,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=5000,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_content}]
             )
@@ -657,7 +657,7 @@ class ClaudeClient:
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=5000,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_content}]
             )
@@ -681,7 +681,7 @@ class ClaudeClient:
                 "key_metrics": []
             }
 
-    async def generate_text(self, prompt: str, max_tokens: int = 1500, system_prompt: str = None) -> Dict[str, Any]:
+    async def generate_text(self, prompt: str, max_tokens: int = 5500, system_prompt: str = None) -> Dict[str, Any]:
         """
         生成文本响应 - 为IntelligentQAOrchestrator提供的通用文本生成方法
         根据可用的API方法（messages API或completion API）动态选择调用方式
