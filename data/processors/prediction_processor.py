@@ -21,7 +21,12 @@ import json
 import hashlib
 from functools import lru_cache
 import math
-
+from core.data_orchestration.smart_data_fetcher import ExecutionResult as FetcherExecutionResult
+from core.data_orchestration.smart_data_fetcher import (
+    ExecutionResult as FetcherExecutionResult,
+    DataQualityLevel as FetcherDataQualityLevel, # 如果 PredictionProcessor 会用到
+    ExecutionStatus as FetcherExecutionStatus  # 如果 PredictionProcessor 会用到
+)
 logger = logging.getLogger(__name__)
 
 
@@ -254,7 +259,15 @@ class PredictionProcessor:
             prediction_params = await self._ai_extract_prediction_parameters(user_query)
 
             # Step 3: 智能构建预测数据集
-            prediction_dataset = await self._build_prediction_dataset(prediction_params, query_type)
+            fetcher_result_from_context: Optional[FetcherExecutionResult] = user_context.get(
+                'data_acquisition_result') if user_context else None
+            if not fetcher_result_from_context or not isinstance(fetcher_result_from_context, FetcherExecutionResult):
+                logger.error(
+                    "PredictionProcessor: 'data_acquisition_result' (FetcherExecutionResult) 未在 user_context 中提供或类型不正确。")
+                return self._create_error_response(user_query, "预测失败：缺少必要的数据获取结果。")
+
+            prediction_dataset = await self._build_prediction_dataset(prediction_params, query_type,
+                                                                      fetcher_result_from_context)
 
             # Step 4: AI驱动的预测分析
             prediction_results = await self._ai_execute_prediction_analysis(
@@ -400,32 +413,62 @@ class PredictionProcessor:
             logger.error(f"预测参数提取失败: {str(e)}")
             return {'time_horizon': {'prediction_days': 30}}
 
-    async def _build_prediction_dataset(self, prediction_params: Dict[str, Any],
-                                        query_type: PredictionQueryType) -> Dict[str, Any]:
-        """智能构建预测数据集"""
-        try:
-            logger.info("📊 构建预测数据集")
+    # 在 PredictionProcessor 类中
+    async def _build_prediction_dataset(self,
+                                        prediction_params: Dict[str, Any],  # 来自 _ai_extract_prediction_parameters
+                                        query_type: PredictionQueryType,
+                                        fetcher_result: FetcherExecutionResult  # 从 user_context 传入
+                                        ) -> Dict[str, Any]:
+        logger.info("📊 从已获取的 FetcherExecutionResult 中构建预测数据集...")
+        dataset = {
+            'current_data': {},
+            'historical_data_series': {},  # 存储多个指标的时间序列
+            'metadata': {
+                'historical_days_available': 0,  # 将从数据中实际计算
+                'prediction_horizon_days': prediction_params.get('time_horizon', {}).get('prediction_days', 30),
+                'data_quality_from_fetcher': getattr(fetcher_result, 'data_quality',
+                                                     FetcherDataQualityLevel.POOR).value,
+                'fetcher_confidence': getattr(fetcher_result, 'confidence_level', 0.0)
+            },
+            'error': None
+        }
 
-            # 确定需要的历史数据范围
-            prediction_days = prediction_params.get('time_horizon', {}).get('prediction_days', 30)
-            historical_days = max(60, prediction_days * 2)  # 至少2倍预测时间的历史数据
-
-            # 构建数据集
-            dataset = {
-                'current_data': await self._get_current_system_data(),
-                'historical_data': await self._get_historical_data(historical_days),
-                'metadata': {
-                    'historical_days': historical_days,
-                    'prediction_days': prediction_days,
-                    'data_quality': 0.8
-                }
-            }
-
+        if not fetcher_result or not fetcher_result.processed_data:
+            dataset['error'] = "数据获取阶段未能提供有效的已处理数据。"
+            logger.error(dataset['error'])
             return dataset
 
-        except Exception as e:
-            logger.error(f"预测数据集构建失败: {str(e)}")
-            return {'current_data': {}, 'historical_data': [], 'metadata': {'error': str(e)}}
+        # 1. 提取当前数据 (通常是系统概览)
+        #    键名 "system_overview_data" 需要与 SmartDataFetcher 的输出约定一致
+        current_data_key = "system_overview_data"
+        if current_data_key in fetcher_result.processed_data:
+            dataset['current_data'] = fetcher_result.processed_data[current_data_key]
+            logger.debug(f"提取到当前系统数据: {list(dataset['current_data'].keys())}")
+        else:
+            logger.warning(f"未能从 processed_data 中找到键 '{current_data_key}' 对应的当前系统数据。")
+            # 可以尝试从 fetcher_result.fetched_data 中查找原始 /api/sta/system 数据作为后备
+
+        # 2. 提取历史时间序列数据
+        #    SmartDataFetcher 的 processed_data 或 time_series_data 中应包含这些
+        #    键名需要约定，例如 'daily_cashflow_series', 'daily_user_growth_series'
+        #    或者，如果 fetcher_result.time_series_data 已经是期望的结构，可以直接使用。
+        if fetcher_result.time_series_data and isinstance(fetcher_result.time_series_data, dict):
+            dataset['historical_data_series'] = fetcher_result.time_series_data  # 直接使用 SmartDataFetcher 构建好的时间序列
+            logger.debug(f"提取到时间序列数据，包含指标: {list(dataset['historical_data_series'].keys())}")
+            # 计算实际可用的历史天数 (基于某个主要时间序列的长度)
+            if dataset['historical_data_series']:
+                # 假设每个时间序列值是一个列表
+                sample_series_key = list(dataset['historical_data_series'].keys())[0]
+                dataset['metadata']['historical_days_available'] = len(
+                    dataset['historical_data_series'][sample_series_key])
+        else:
+            logger.warning("未能从 FetcherExecutionResult 中找到结构化的 time_series_data。预测准确性可能受影响。")
+
+        if not dataset['current_data'] and not dataset['historical_data_series']:
+            dataset['error'] = "未能从获取结果中准备任何有效的当前或历史数据用于预测。"
+            logger.error(dataset['error'])
+
+        return dataset
 
     async def _get_current_system_data(self) -> Dict[str, Any]:
         """获取当前系统数据"""

@@ -140,7 +140,7 @@ class FinancialDataAnalyzer:
         self.date_utils = create_date_utils(claude_client)
         self.validator = create_validation_utils(claude_client, gpt_client)
         self.time_series_builder = create_time_series_builder(claude_client, gpt_client)
-        self.financial_calculator = create_financial_calculator(claude_client, gpt_client)
+        self.financial_calculator = create_financial_calculator(gpt_client, 4)  # 修正参数顺序，明确指定precision为4
 
         # 分析配置
         self.analysis_config = self._load_analysis_config()

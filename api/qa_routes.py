@@ -1,4 +1,4 @@
-# api/qa_routes.py - 完整版本
+# api/qa_routes.py - 完整版本（包含user_id角色标识）
 from flask import Blueprint, jsonify, request
 from core.orchestrator.intelligent_qa_orchestrator import get_orchestrator, ProcessingResult
 import asyncio
@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 import json
 import time
-import uuid  # 用于生成唯一ID
+import uuid
 
 logger = logging.getLogger(__name__)
 qa_routes_bp = Blueprint('qa_routes', __name__, url_prefix='/api/qa')
@@ -50,29 +50,27 @@ def validate_query_request_data(data: Optional[Dict[str, Any]]) -> Dict[str, Any
     if len(query) > 2000:  # 稍微放宽查询长度限制
         raise ValueError("查询内容过长，请控制在2000字符以内。")
 
-    # 用户ID可以是字符串或数字，统一处理为整数
+    # user_id 现在是角色标识：0=用户，1=系统，允许为空时默认为0
     user_id_raw = data.get('user_id')
-    if user_id_raw is None:  # 允许匿名用户，但需要明确处理
-        user_id = 0  # 或其他代表匿名用户的标识
-        logger.info("未提供user_id，将作为匿名用户处理。")
+    if user_id_raw is None:
+        user_id = 0  # 默认为用户角色
+        logger.info("未提供user_id，默认为用户角色(0)。")
     elif isinstance(user_id_raw, (str, int)):
         try:
             user_id = int(user_id_raw)
-            if user_id < 0:  # 允许0代表匿名，但不能为负数
-                raise ValueError("用户ID (user_id) 不能为负数。")
+            if user_id not in [0, 1]:  # 只允许0或1
+                raise ValueError("用户角色ID (user_id) 必须是0（用户）或1（系统）。")
         except ValueError:
-            raise ValueError("用户ID (user_id) 必须是有效的整数。")
+            raise ValueError("用户角色ID (user_id) 必须是有效的整数（0或1）。")
     else:
-        raise ValueError("用户ID (user_id) 类型无效。")
+        raise ValueError("用户角色ID (user_id) 类型无效。")
 
     conversation_id = data.get('conversation_id')
     if conversation_id is not None:  # conversation_id 是可选的
-        if not isinstance(conversation_id, str) or not (30 < len(conversation_id) < 40):  # 典型的UUID长度
-            # 可以使用更宽松的校验，或者在创建时就使用UUID
-            try:
-                uuid.UUID(conversation_id)  # 尝试将字符串转换为UUID对象以验证格式
-            except ValueError:
-                raise ValueError("提供的对话ID (conversation_id) 格式无效。")
+        if not isinstance(conversation_id, str):
+            raise ValueError("对话ID (conversation_id) 必须是字符串类型。")
+        if len(conversation_id.strip()) == 0:
+            raise ValueError("对话ID (conversation_id) 不能为空字符串。")
 
     preferences = data.get('preferences', {})
     if not isinstance(preferences, dict):
@@ -84,7 +82,7 @@ def validate_query_request_data(data: Optional[Dict[str, Any]]) -> Dict[str, Any
 
     return {
         'query': query,
-        'user_id': user_id,  # 注意：如果允许匿名，后续逻辑需要能处理 user_id 为 0 的情况
+        'user_id': user_id,  # 角色标识：0=用户，1=系统
         'conversation_id': conversation_id,
         'preferences': preferences,
         'context_override': context_override
@@ -127,13 +125,13 @@ def create_api_error_response(message: str, error_type: str = "processing_error"
 
 @qa_routes_bp.route('/ask', methods=['POST'])
 @async_route
-async def intelligent_Youtubeing():
+async def intelligent_qa():
     """
     🧠 智能问答主接口 - 接收用户自然语言查询并返回分析结果和洞察。
     请求体 (JSON):
     {
         "query": "用户的自然语言查询",
-        "user_id": 123, // 用户ID (整数, >0) 或 0/null 代表匿名
+        "user_id": 0, // 角色标识: 0=用户, 1=系统 (可选，默认0)
         "conversation_id": "optional_conversation_uuid_string", // 可选，用于跟踪对话上下文
         "preferences": { // 可选的用户偏好
             "response_format": "detailed", // "summary", "detailed", "bullet_points"
@@ -165,13 +163,11 @@ async def intelligent_Youtubeing():
         start_time = time.time()
 
         # 调用编排器的核心处理方法
-        # 注意: orchestrator.process_intelligent_query 现在也需要是 async
         processing_result: ProcessingResult = await orchestrator.process_intelligent_query(
             user_query=validated_data['query'],
-            user_id=validated_data['user_id'],  # 传递整数
+            user_id=validated_data['user_id'],  # 传递角色标识
             conversation_id=validated_data['conversation_id'],
             preferences=validated_data['preferences']
-            # context_override 可以在 orchestrator.process_intelligent_query 内部处理
         )
 
         end_time = time.time()
@@ -239,7 +235,7 @@ async def create_new_conversation():
     💬 创建一个新的对话会话。
     请求体 (JSON):
     {
-        "user_id": 123, // 用户ID (整数, >=0, 0代表匿名)
+        "user_id": 0, // 角色标识: 0=用户, 1=系统 (可选，默认0)
         "title": "7月资金规划与风险评估", // 可选, 如果不提供，AI可自动生成或使用默认标题
         "initial_context": {} // 可选, 对话的初始上下文信息
     }
@@ -247,28 +243,27 @@ async def create_new_conversation():
     request_id = str(uuid.uuid4())
     logger.info(f"💬 RequestID: {request_id} - API: /conversations - 收到创建新对话请求...")
     try:
-        if not orchestrator.initialized: await orchestrator.initialize()
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
 
         request_json = request.get_json()
         if not request_json:
-            return create_api_error_response("请求数据不能为空。", "validation_error", 400, {"request_id": request_id})
+            request_json = {}  # 允许空请求体
 
-        user_id_raw = request_json.get('user_id')
-        if user_id_raw is None:
-            return create_api_error_response("用户ID (user_id) 不能为空。", "validation_error", 400,
-                                             {"request_id": request_id})
+        # 验证 user_id（角色标识）
+        user_id_raw = request_json.get('user_id', 0)  # 默认为用户角色
         try:
             user_id = int(user_id_raw)
-            if user_id < 0:
-                raise ValueError("用户ID不能为负数。")
+            if user_id not in [0, 1]:
+                return create_api_error_response("角色ID (user_id) 必须是0（用户）或1（系统）。", "validation_error", 400,
+                                                 {"request_id": request_id})
         except ValueError:
-            return create_api_error_response("用户ID (user_id) 必须是有效的非负整数。", "validation_error", 400,
+            return create_api_error_response("角色ID (user_id) 必须是有效的整数（0或1）。", "validation_error", 400,
                                              {"request_id": request_id})
 
-        title = request_json.get('title',
-                                 f"用户{user_id}的新对话 - {datetime.now().strftime('%Y-%m-%d %H:%M')}").strip()
+        title = request_json.get('title', f"新对话 - {datetime.now().strftime('%Y-%m-%d %H:%M')}").strip()
         if not title:  # 如果用户提供空标题，则使用默认
-            title = f"用户{user_id}的对话 - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            title = f"对话 - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         if len(title) > 255:
             title = title[:252] + "..."  # 限制标题长度
 
@@ -278,21 +273,18 @@ async def create_new_conversation():
                                              400, {"request_id": request_id})
 
         # 使用编排器内建的 conversation_manager
-        # ConversationManager 的 create_conversation 方法现在接收字符串类型的 conversation_id
-        new_conversation_id_int = orchestrator.conversation_manager.create_conversation(  # 此方法返回 int
+        new_conversation_id = orchestrator.conversation_manager.create_conversation(
             title=title,
-            user_id=user_id,
+            user_id=user_id,  # 传递角色标识
             initial_context=initial_context
         )
 
-        # 通常对话ID会是UUID字符串，如果create_conversation返回的是数字ID，需要调整
-        # 假设 ConversationManager.create_conversation 返回的是数据库自增ID (int)
-        # 如果需要UUID，可以在这里生成或由ConversationManager内部生成并返回
-        new_conversation_id_str = str(new_conversation_id_int)  # 如果只是简单转为字符串
+        # 转换为字符串ID
+        new_conversation_id_str = str(new_conversation_id)
 
-        logger.info(f"RequestID: {request_id} - 💬 API: 为用户 {user_id} 创建新对话成功: ID={new_conversation_id_str}")
+        logger.info(f"RequestID: {request_id} - 💬 API: 为角色 {user_id} 创建新对话成功: ID={new_conversation_id_str}")
         return create_api_success_response(
-            {'conversation_id': new_conversation_id_str, 'title': title},  # 返回字符串ID
+            {'conversation_id': new_conversation_id_str, 'title': title, 'user_id': user_id},
             "新对话创建成功"
         )
     except ValueError as ve:
@@ -314,16 +306,17 @@ async def get_conversation_details(conversation_id_str: str):
     request_id = str(uuid.uuid4())
     logger.info(f"📄 RequestID: {request_id} - API: /conversations/{conversation_id_str} - 请求获取对话详情...")
     try:
-        if not orchestrator.initialized: await orchestrator.initialize()
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
 
-        # 验证conversation_id_str是否可以转换为整数，因为ConversationManager内部使用int
+        # 验证conversation_id_str是否可以转换为整数或直接使用字符串
         try:
+            # 尝试转换为整数（如果后端使用整数ID）
             conversation_id_int = int(conversation_id_str)
+            conversation_data = orchestrator.conversation_manager.get_conversation(conversation_id_int)
         except ValueError:
-            return create_api_error_response(f"无效的对话ID格式: '{conversation_id_str}'，应为整数。", "validation_error",
-                                             400, {"request_id": request_id})
-
-        conversation_data = orchestrator.conversation_manager.get_conversation(conversation_id_int)
+            # 如果转换失败，直接使用字符串（如果后端使用字符串ID）
+            conversation_data = orchestrator.conversation_manager.get_conversation(conversation_id_str)
 
         if not conversation_data:
             logger.warning(f"⚠️ RequestID: {request_id} - API: 对话ID '{conversation_id_str}' 未找到。")
@@ -343,18 +336,21 @@ async def get_conversation_details(conversation_id_str: str):
 @async_route
 async def get_user_conversation_list(user_id: int):
     """
-    📋 获取指定用户的所有对话列表（支持分页）。
+    📋 获取指定角色的所有对话列表（支持分页）。
+    参数:
+    - user_id: 角色标识 (0=用户, 1=系统)
     查询参数:
     - limit (int, 可选, 默认20, 范围 1-100): 每页数量。
     - offset (int, 可选, 默认0, >=0): 偏移量。
     """
     request_id = str(uuid.uuid4())
-    logger.info(f"📋 RequestID: {request_id} - API: /conversations/user/{user_id} - 请求获取用户对话列表...")
+    logger.info(f"📋 RequestID: {request_id} - API: /conversations/user/{user_id} - 请求获取角色对话列表...")
     try:
-        if not orchestrator.initialized: await orchestrator.initialize()
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
 
-        if user_id < 0:  # 假设0是匿名用户，允许
-            return create_api_error_response("用户ID (user_id) 不能为负数。", "validation_error", 400,
+        if user_id not in [0, 1]:  # 只允许0或1
+            return create_api_error_response("角色ID (user_id) 必须是0（用户）或1（系统）。", "validation_error", 400,
                                              {"request_id": request_id})
 
         limit = request.args.get('limit', 20, type=int)
@@ -371,14 +367,15 @@ async def get_user_conversation_list(user_id: int):
             user_id=user_id, limit=limit, offset=offset
         )
 
-        # 获取总对话数用于分页 (ConversationManager 需要一个 count_user_conversations 方法)
-        # total_conversations = orchestrator.conversation_manager.count_user_conversations(user_id)
-        # 模拟一个总数，实际应从DB获取
-        # total_conversations = len(conversations) if offset == 0 and len(conversations) < limit else (offset + len(conversations) + (limit if len(conversations) == limit else 0) )
-        # 由于无法准确获取总数，暂时不返回 total_count
+        # 获取总对话数用于分页
+        try:
+            total_conversations = orchestrator.conversation_manager.count_user_conversations(user_id)
+        except AttributeError:
+            # 如果ConversationManager没有count方法，使用当前返回的数量作为估计
+            total_conversations = len(conversations) if len(conversations) < limit else offset + len(conversations) + 1
 
         logger.info(
-            f"RequestID: {request_id} - ✅ API: 获取用户 {user_id} 的对话列表成功 (Limit: {limit}, Offset: {offset}, Returned: {len(conversations)})")
+            f"RequestID: {request_id} - ✅ API: 获取角色 {user_id} 的对话列表成功 (Limit: {limit}, Offset: {offset}, Returned: {len(conversations)})")
         return create_api_success_response({
             'conversations': conversations,
             'pagination': {
@@ -386,13 +383,181 @@ async def get_user_conversation_list(user_id: int):
                 'limit': limit,
                 'offset': offset,
                 'returned_count': len(conversations),
-                # 'total_count': total_conversations # 当实现时取消注释
+                'total_count': total_conversations
             }
-        }, "用户对话列表获取成功")
+        }, "角色对话列表获取成功")
 
     except Exception as e:
-        logger.error(f"❌ RequestID: {request_id} - API: 获取用户对话列表失败: {str(e)}\n{traceback.format_exc()}")
-        return create_api_error_response(f"获取用户对话列表失败: {str(e)}", "internal_server_error", 500,
+        logger.error(f"❌ RequestID: {request_id} - API: 获取角色对话列表失败: {str(e)}\n{traceback.format_exc()}")
+        return create_api_error_response(f"获取角色对话列表失败: {str(e)}", "internal_server_error", 500,
+                                         {"request_id": request_id})
+
+
+@qa_routes_bp.route('/conversations', methods=['GET'])
+@async_route
+async def get_all_conversations():
+    """
+    📋 获取所有对话列表（支持分页）- 不区分角色。
+    查询参数:
+    - limit (int, 可选, 默认20, 范围 1-100): 每页数量。
+    - offset (int, 可选, 默认0, >=0): 偏移量。
+    - user_id (int, 可选): 按角色过滤 (0=用户, 1=系统)
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"📋 RequestID: {request_id} - API: /conversations - 请求获取对话列表...")
+    try:
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
+
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        user_id_filter = request.args.get('user_id', type=int)
+
+        if not (1 <= limit <= 100):
+            return create_api_error_response("参数 'limit' 必须在 1 到 100 之间。", "validation_error", 400,
+                                             {"request_id": request_id})
+        if offset < 0:
+            return create_api_error_response("参数 'offset' 不能为负数。", "validation_error", 400,
+                                             {"request_id": request_id})
+
+        if user_id_filter is not None and user_id_filter not in [0, 1]:
+            return create_api_error_response("过滤角色ID (user_id) 必须是0（用户）或1（系统）。", "validation_error", 400,
+                                             {"request_id": request_id})
+
+        # 根据是否有user_id过滤来调用不同的方法
+        if user_id_filter is not None:
+            conversations = orchestrator.conversation_manager.get_user_conversations(
+                user_id=user_id_filter, limit=limit, offset=offset
+            )
+            try:
+                total_conversations = orchestrator.conversation_manager.count_user_conversations(user_id_filter)
+            except AttributeError:
+                total_conversations = len(conversations) if len(conversations) < limit else offset + len(conversations) + 1
+        else:
+            # 获取所有对话
+            try:
+                conversations = orchestrator.conversation_manager.get_all_conversations(
+                    limit=limit, offset=offset
+                )
+                total_conversations = orchestrator.conversation_manager.count_all_conversations()
+            except AttributeError:
+                # 如果没有get_all_conversations方法，降级到获取用户角色的对话
+                logger.warning("ConversationManager缺少get_all_conversations方法，降级到用户角色对话")
+                conversations = orchestrator.conversation_manager.get_user_conversations(
+                    user_id=0, limit=limit, offset=offset
+                )
+                total_conversations = len(conversations) if len(conversations) < limit else offset + len(conversations) + 1
+
+        logger.info(
+            f"RequestID: {request_id} - ✅ API: 获取对话列表成功 (Limit: {limit}, Offset: {offset}, Filter: {user_id_filter}, Returned: {len(conversations)})")
+        
+        return create_api_success_response({
+            'conversations': conversations,
+            'pagination': {
+                'limit': limit,
+                'offset': offset,
+                'returned_count': len(conversations),
+                'total_count': total_conversations,
+                'user_id_filter': user_id_filter
+            }
+        }, "对话列表获取成功")
+
+    except Exception as e:
+        logger.error(f"❌ RequestID: {request_id} - API: 获取对话列表失败: {str(e)}\n{traceback.format_exc()}")
+        return create_api_error_response(f"获取对话列表失败: {str(e)}", "internal_server_error", 500,
+                                         {"request_id": request_id})
+
+
+# ============= 删除对话API =============
+
+@qa_routes_bp.route('/conversations/<string:conversation_id_str>', methods=['DELETE'])
+@async_route
+async def delete_conversation(conversation_id_str: str):
+    """
+    🗑️ 删除指定对话
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"🗑️ RequestID: {request_id} - API: DELETE /conversations/{conversation_id_str} - 请求删除对话...")
+    try:
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
+
+        # 验证conversation_id并删除
+        try:
+            conversation_id_int = int(conversation_id_str)
+            success = orchestrator.conversation_manager.delete_conversation(conversation_id_int)
+        except ValueError:
+            success = orchestrator.conversation_manager.delete_conversation(conversation_id_str)
+
+        if not success:
+            logger.warning(f"⚠️ RequestID: {request_id} - API: 对话ID '{conversation_id_str}' 未找到或删除失败。")
+            return create_api_error_response(f"对话ID '{conversation_id_str}' 未找到。", "not_found_error", 404,
+                                             {"request_id": request_id})
+
+        logger.info(f"RequestID: {request_id} - ✅ API: 删除对话成功: ID={conversation_id_str}")
+        return create_api_success_response(
+            {'conversation_id': conversation_id_str}, 
+            "对话删除成功"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ RequestID: {request_id} - API: 删除对话失败: {str(e)}\n{traceback.format_exc()}")
+        return create_api_error_response(f"删除对话失败: {str(e)}", "internal_server_error", 500,
+                                         {"request_id": request_id})
+
+
+# ============= 更新对话标题API =============
+
+@qa_routes_bp.route('/conversations/<string:conversation_id_str>', methods=['PUT'])
+@async_route
+async def update_conversation_title(conversation_id_str: str):
+    """
+    ✏️ 更新对话标题
+    请求体 (JSON):
+    {
+        "title": "新的对话标题"
+    }
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"✏️ RequestID: {request_id} - API: PUT /conversations/{conversation_id_str} - 请求更新对话标题...")
+    try:
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
+
+        request_json = request.get_json()
+        if not request_json or 'title' not in request_json:
+            return create_api_error_response("请求体必须包含 'title' 字段。", "validation_error", 400,
+                                             {"request_id": request_id})
+
+        new_title = request_json['title'].strip()
+        if not new_title:
+            return create_api_error_response("标题不能为空。", "validation_error", 400,
+                                             {"request_id": request_id})
+        
+        if len(new_title) > 255:
+            new_title = new_title[:252] + "..."
+
+        # 更新对话标题
+        try:
+            conversation_id_int = int(conversation_id_str)
+            success = orchestrator.conversation_manager.update_conversation_title(conversation_id_int, new_title)
+        except ValueError:
+            success = orchestrator.conversation_manager.update_conversation_title(conversation_id_str, new_title)
+
+        if not success:
+            logger.warning(f"⚠️ RequestID: {request_id} - API: 对话ID '{conversation_id_str}' 未找到或更新失败。")
+            return create_api_error_response(f"对话ID '{conversation_id_str}' 未找到。", "not_found_error", 404,
+                                             {"request_id": request_id})
+
+        logger.info(f"RequestID: {request_id} - ✅ API: 更新对话标题成功: ID={conversation_id_str}, Title={new_title}")
+        return create_api_success_response(
+            {'conversation_id': conversation_id_str, 'title': new_title}, 
+            "对话标题更新成功"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ RequestID: {request_id} - API: 更新对话标题失败: {str(e)}\n{traceback.format_exc()}")
+        return create_api_error_response(f"更新对话标题失败: {str(e)}", "internal_server_error", 500,
                                          {"request_id": request_id})
 
 
@@ -443,7 +608,8 @@ async def get_qa_system_statistics():
     request_id = str(uuid.uuid4())
     logger.info(f"📊 RequestID: {request_id} - API: /system/stats - 请求获取QA系统统计信息...")
     try:
-        if not orchestrator.initialized: await orchestrator.initialize()
+        if not orchestrator.initialized: 
+            await orchestrator.initialize()
 
         orchestrator_stats = orchestrator.get_orchestrator_stats()
 
@@ -489,7 +655,6 @@ async def get_qa_system_statistics():
 
 
 # ============= 蓝图级别的错误处理 =============
-# 这些处理器会捕获在蓝图内未被特定try-except块处理的异常
 
 @qa_routes_bp.app_errorhandler(ValueError)  # 通常是参数验证错误
 def handle_qa_value_error(error: ValueError):

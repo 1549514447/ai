@@ -65,6 +65,11 @@ class BusinessScenario(Enum):
     FUTURE_PROJECTION = "future_projection"      # 未来趋势与资金预测
     HISTORICAL_PERFORMANCE = "historical_performance" # 历史业绩回顾
     REGULATORY_COMPLIANCE = "regulatory_compliance" # 合规性检查 (未来可能)
+    FINANCIAL_PLANNING = "financial_planning"    # 财务规划
+    GROWTH_ANALYSIS = "growth_analysis"          # 增长分析
+    USER_BEHAVIOR = "user_behavior"              # 用户行为
+    PRODUCT_PERFORMANCE = "product_performance"  # 产品表现
+    COMPLIANCE_CHECK = "compliance_check"        # 合规检查
 
 
 @dataclass
@@ -492,13 +497,25 @@ class SmartQueryParser:
 
             # 从Claude分析中提取复杂度指标
             claude_data = claude_analysis.get("claude_understanding", {})
+            if not isinstance(claude_data, dict):
+                claude_data = {}
             business_logic = claude_data.get("business_logic_complexity", {})
+            if not isinstance(business_logic, dict):
+                business_logic = {}
             analysis_requirements = claude_data.get("analysis_requirements", {})
+            if not isinstance(analysis_requirements, dict):
+                analysis_requirements = {}
 
             # 从GPT分析中提取计算复杂度
             gpt_data = gpt_analysis.get("gpt_analysis", {})
+            if not isinstance(gpt_data, dict):
+                gpt_data = {}
             calculation_requirements = gpt_data.get("calculation_requirements", {})
+            if not isinstance(calculation_requirements, dict):
+                calculation_requirements = {}
             processing_needs = gpt_data.get("data_processing_needs", {})
+            if not isinstance(processing_needs, dict):
+                processing_needs = {}
 
             # 🎯 复杂度评分计算
             complexity_score = 0
@@ -610,12 +627,17 @@ class SmartQueryParser:
         """确定查询类型"""
 
         # 从Claude分析中获取分析类型
-        analysis_type = claude_data.get("analysis_requirements", {}).get("analysis_type", "descriptive")
-        depth_level = claude_data.get("analysis_requirements", {}).get("depth_level", "overview")
+        if not isinstance(claude_data, dict):
+            claude_data = {}
+        analysis_requirements = claude_data.get("analysis_requirements", {})
+        if not isinstance(analysis_requirements, dict):
+            analysis_requirements = {}
+        analysis_type = analysis_requirements.get("analysis_type", "descriptive")
+        depth_level = analysis_requirements.get("depth_level", "overview")
 
         # 从GPT分析中获取计算需求
-        requires_forecasting = claude_data.get("analysis_requirements", {}).get("requires_forecasting", False)
-        requires_scenario = claude_data.get("analysis_requirements", {}).get("requires_scenario_analysis", False)
+        requires_forecasting = analysis_requirements.get("requires_forecasting", False)
+        requires_scenario = analysis_requirements.get("requires_scenario_analysis", False)
 
         # 基于模式匹配
         query_lower = query.lower()
@@ -639,7 +661,12 @@ class SmartQueryParser:
     def _determine_business_scenario(self, claude_data: Dict[str, Any]) -> BusinessScenario:
         """确定业务场景"""
 
-        primary_scenario = claude_data.get("business_scenario", {}).get("primary_scenario", "")
+        if not isinstance(claude_data, dict):
+            claude_data = {}
+        business_scenario = claude_data.get("business_scenario", {})
+        if not isinstance(business_scenario, dict):
+            business_scenario = {}
+        primary_scenario = business_scenario.get("primary_scenario", "")
 
         scenario_mapping = {
             "daily_operations": BusinessScenario.DAILY_OPERATIONS,
@@ -665,8 +692,14 @@ class SmartQueryParser:
             date_parse_result = await self.date_utils.parse_dates_from_query(query)
 
             # 从Claude分析中获取时间相关信息
+            if not isinstance(claude_analysis, dict):
+                claude_analysis = {}
             claude_data = claude_analysis.get("claude_understanding", {})
+            if not isinstance(claude_data, dict):
+                claude_data = {}
             analysis_requirements = claude_data.get("analysis_requirements", {})
+            if not isinstance(analysis_requirements, dict):
+                analysis_requirements = {}
 
             # 确定时间范围需求
             if date_parse_result.has_time_info:
@@ -1073,13 +1106,23 @@ class SmartQueryParser:
 
         # 提取数据需求
         gpt_data = gpt_analysis.get("gpt_analysis", {})
+        if not isinstance(gpt_data, dict):
+            gpt_data = {}
         data_requirements = gpt_data.get("required_data_sources", {})
+        if not isinstance(data_requirements, dict):
+            data_requirements = {}
         required_apis = data_requirements.get("primary_apis", []) + data_requirements.get("secondary_apis", [])
 
         # 提取业务参数
         claude_data = claude_analysis.get("claude_understanding", {})
+        if not isinstance(claude_data, dict):
+            claude_data = {}
         business_parameters = claude_data.get("key_business_parameters", {})
+        if not isinstance(business_parameters, dict):
+            business_parameters = {}
         calculation_requirements = gpt_data.get("calculation_requirements", {})
+        if not isinstance(calculation_requirements, dict):
+            calculation_requirements = {}
 
         # 确定处理策略
         complexity = complexity_analysis["complexity"]

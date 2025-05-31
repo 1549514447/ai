@@ -72,25 +72,26 @@ class DatabaseConnector:
     def _init_sync_pool(self):
         """初始化同步连接池"""
         try:
+            # 为连接池配置提供默认值
             pool_config = {
-                'pool_name': self.config['pool_name'],
-                'pool_size': self.config['pool_size'],
-                'host': self.config['host'],
-                'user': self.config['user'],
-                'password': self.config['password'],
-                'database': self.config['database'],
-                'port': self.config['port'],
-                'charset': self.config['charset'],
-                'autocommit': self.config['autocommit'],
-                'connection_timeout': self.config['connection_timeout']
+                'pool_name': self.config.get('pool_name', 'mysql_pool'),
+                'pool_size': self.config.get('pool_size', 5),
+                'host': self.config.get('host', 'localhost'),
+                'user': self.config.get('user', 'root'),
+                'password': self.config.get('password', '119689'),
+                'database': self.config.get('database', 'jarvis'),
+                'port': self.config.get('port', 3306),
+                'charset': self.config.get('charset', 'utf8mb4'),
+                'autocommit': self.config.get('autocommit', True),
+                'connection_timeout': self.config.get('connection_timeout', 180)
             }
 
             self.sync_pool = mysql.connector.pooling.MySQLConnectionPool(**pool_config)
-            logger.info(f"Sync connection pool initialized: {self.config['pool_name']}")
+            logger.info(f"Sync connection pool initialized: {pool_config['pool_name']}")
 
         except Exception as e:
             logger.error(f"Failed to initialize sync connection pool: {str(e)}")
-            raise
+            # 不抛出异常，允许应用继续运行，但数据库功能将不可用
 
     async def _init_async_pool(self):
         """初始化异步连接池"""
@@ -122,10 +123,12 @@ class DatabaseConnector:
         try:
             conn = self.sync_pool.get_connection()
             yield conn
-            if not self.config['autocommit']:
+            # 使用get方法获取autocommit配置，提供默认值True
+            if not self.config.get('autocommit', True):
                 conn.commit()
         except Exception as e:
-            if conn and not self.config['autocommit']:
+            # 使用get方法获取autocommit配置，提供默认值True
+            if conn and not self.config.get('autocommit', True):
                 conn.rollback()
             logger.error(f"Database operation failed: {str(e)}")
             raise
@@ -430,8 +433,8 @@ class DatabaseConnector:
                       (self.performance_stats['total_queries'] - 1) + execution_time)
         self.performance_stats['avg_query_time'] = total_time / self.performance_stats['total_queries']
 
-        # 记录慢查询
-        if execution_time > self.config['slow_query_threshold']:
+        # 记录慢查询，使用get方法获取slow_query_threshold配置，提供默认值1.0
+        if execution_time > self.config.get('slow_query_threshold', 1.0):
             self.performance_stats['slow_queries'].append({
                 'query': query,
                 'execution_time': execution_time,

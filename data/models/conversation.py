@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import dataclass, field  # field 需要从 dataclasses 导入
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from data.connectors.database_connector import DatabaseConnector  # 确保 DatabaseConnector 被正确导入
 
 logger = logging.getLogger(__name__)
@@ -178,10 +178,27 @@ class ConversationManager:
             logger.error(f"Failed to add DB visual: {str(e)}")
             raise
 
-    def get_conversation(self, conversation_id: int) -> Optional[Dict[str, Any]]:
-        """获取完整对话内容。如果无DB连接，则从内存获取。"""
+    def get_conversation(self, conversation_id: Union[int, str]) -> Optional[Dict[str, Any]]:
+        """
+        获取完整对话内容。如果无DB连接，则从内存获取。
+        
+        Args:
+            conversation_id: 对话ID，可以是整数或字符串
+            
+        Returns:
+            Optional[Dict[str, Any]]: 对话详情，包括对话信息、消息列表和统计数据
+        """
+        # 确保conversation_id是整数类型
+        if isinstance(conversation_id, str):
+            try:
+                conversation_id = int(conversation_id)
+            except ValueError:
+                logger.error(f"Invalid conversation_id format: {conversation_id}")
+                return None
+                
         if not self.db:
             if conversation_id not in self._memory_conversations:
+                logger.warning(f"Conversation {conversation_id} not found in memory")
                 return None
 
             conv_info_mem = self._memory_conversations[conversation_id].copy()
@@ -322,8 +339,21 @@ class ConversationManager:
             return []
 
     def get_user_conversations(self, user_id: int, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-        """获取用户的对话列表。如果无DB，则从内存获取。"""
+        """
+        获取指定用户角色的对话列表，支持分页。
+        
+        Args:
+            user_id: 用户角色ID (0=用户, 1=系统)
+            limit: 每页数量
+            offset: 偏移量
+            
+        Returns:
+            List[Dict[str, Any]]: 对话列表
+        """
+        logger.info(f"Fetching conversations for user_id={user_id} with limit={limit}, offset={offset}")
+        
         if not self.db:
+            # 内存模式下，获取指定用户的对话
             user_convs = []
             for conv_id, conv_data in self._memory_conversations.items():
                 if conv_data['user_id'] == user_id:
@@ -334,9 +364,15 @@ class ConversationManager:
                             if not msg['is_user']:
                                 last_ai_msg_content = msg['content']
                                 break
+                    # 确保ID是字符串格式，并添加conversation_id字段
+                    conv_id_str = str(conv_id)
                     user_convs.append({
-                        'id': conv_id, 'title': conv_data['title'],
-                        'created_at': conv_data['created_at'], 'updated_at': conv_data['updated_at'],
+                        'id': conv_id_str,
+                        'conversation_id': conv_id_str,  # 添加前端期望的字段
+                        'title': conv_data['title'],
+                        'user_id': conv_data['user_id'],
+                        'created_at': conv_data['created_at'], 
+                        'updated_at': conv_data['updated_at'],
                         'status': 'active' if conv_data.get('status', 1) == 1 else 'archived',
                         'last_ai_message': last_ai_msg_content,
                         'message_count': len(msgs),
@@ -345,10 +381,10 @@ class ConversationManager:
             # 内存排序和分页
             user_convs.sort(key=lambda c: c['updated_at'], reverse=True)
             return user_convs[offset: offset + limit]
-
+            
         try:
             query = """
-                SELECT c.id, c.title, c.created_at, c.updated_at, c.status,
+                SELECT c.id, c.title, c.user_id, c.created_at, c.updated_at, c.status,
                        (SELECT content FROM messages
                         WHERE conversation_id = c.id AND is_user = 0
                         ORDER BY created_at DESC LIMIT 1) as last_ai_message,
@@ -362,141 +398,125 @@ class ConversationManager:
                 LIMIT %s OFFSET %s
             """
             conversations = self.db.execute_query(query, (user_id, limit, offset))
-            for conv in conversations: conv['status'] = 'active' if conv.get('status', 1) == 1 else 'archived'
-            logger.debug(f"DB: Retrieved {len(conversations)} conversations for user {user_id}")
+            for conv in conversations: 
+                conv['status'] = 'active' if conv.get('status', 1) == 1 else 'archived'
+                # 确保ID是字符串格式，并添加conversation_id字段
+                conv['id'] = str(conv['id'])
+                conv['conversation_id'] = conv['id']  # 添加前端期望的字段
+            logger.debug(f"DB: Retrieved {len(conversations)} conversations for user_id {user_id}")
             return conversations
         except Exception as e:
-            logger.error(f"Failed to get DB user conversations for {user_id}: {str(e)}")
+            logger.error(f"Failed to get user conversations for user_id {user_id}: {str(e)}")
             return []
-
-    # ... (get_user_query_patterns 和 get_related_conversations 保持原样，但也要考虑无DB的情况) ...
-    def get_user_query_patterns(self, user_id: int, days: int = 30) -> List[Dict[str, Any]]:
+            
+    def count_user_conversations(self, user_id: int) -> int:
+        """
+        获取指定用户角色的对话总数。
+        
+        Args:
+            user_id: 用户角色ID (0=用户, 1=系统)
+            
+        Returns:
+            int: 对话总数
+        """
         if not self.db:
-            # 内存实现会比较复杂，需要遍历所有内存对话和消息
-            logger.warning("get_user_query_patterns: In-memory implementation is basic.")
-            patterns = []
-            cutoff_date = datetime.now() - timedelta(days=days)
+            # 内存模式下，计算指定用户的对话数量
+            return sum(1 for conv_data in self._memory_conversations.values() if conv_data['user_id'] == user_id)
+            
+        try:
+            query = "SELECT COUNT(*) as count FROM conversations WHERE user_id = %s"
+            result = self.db.execute_query(query, (user_id,))
+            return result[0]['count'] if result else 0
+        except Exception as e:
+            logger.error(f"Failed to count user conversations for user_id {user_id}: {str(e)}")
+            return 0
+            
+    def count_all_conversations(self) -> int:
+        """
+        获取所有对话的总数。
+        
+        Returns:
+            int: 对话总数
+        """
+        if not self.db:
+            # 内存模式下，计算所有对话数量
+            return len(self._memory_conversations)
+            
+        try:
+            query = "SELECT COUNT(*) as count FROM conversations"
+            result = self.db.execute_query(query)
+            return result[0]['count'] if result else 0
+        except Exception as e:
+            logger.error(f"Failed to count all conversations: {str(e)}")
+            return 0
+            
+    def get_all_conversations(self, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        获取所有对话列表，支持分页。
+        
+        Args:
+            limit: 每页数量
+            offset: 偏移量
+            
+        Returns:
+            List[Dict[str, Any]]: 对话列表
+        """
+        logger.info(f"Fetching all conversations with limit={limit}, offset={offset}")
+        
+        if not self.db:
+            # 内存模式下，获取所有对话
+            all_convs = []
             for conv_id, conv_data in self._memory_conversations.items():
-                if conv_data['user_id'] == user_id:
-                    for msg_data in self._memory_messages.get(conv_id, []):
-                        if msg_data['is_user'] and msg_data['created_at'] >= cutoff_date:
-                            patterns.append({
-                                'content': msg_data['content'],
-                                'ai_strategy': msg_data.get('ai_strategy'),
-                                'created_at': msg_data['created_at'],
-                                'title': conv_data['title']
-                            })
-            patterns.sort(key=lambda p: p['created_at'], reverse=True)
-            return patterns
-        # DB implementation remains
+                msgs = self._memory_messages.get(conv_id, [])
+                last_ai_msg_content = None
+                if msgs:
+                    for msg in reversed(msgs):
+                        if not msg['is_user']:
+                            last_ai_msg_content = msg['content']
+                            break
+                # 确保ID是字符串格式，并添加conversation_id字段
+                conv_id_str = str(conv_id)
+                all_convs.append({
+                    'id': conv_id_str,
+                    'conversation_id': conv_id_str,  # 添加前端期望的字段
+                    'title': conv_data['title'],
+                    'user_id': conv_data['user_id'],
+                    'created_at': conv_data['created_at'], 
+                    'updated_at': conv_data['updated_at'],
+                    'status': 'active' if conv_data.get('status', 1) == 1 else 'archived',
+                    'last_ai_message': last_ai_msg_content,
+                    'message_count': len(msgs),
+                    'ai_models_used': len(set(m['ai_model_used'] for m in msgs if m['ai_model_used']))
+                })
+            # 内存排序和分页
+            all_convs.sort(key=lambda c: c['updated_at'], reverse=True)
+            return all_convs[offset: offset + limit]
+            
         try:
             query = """
-                SELECT m.content, m.ai_strategy, m.created_at, c.title
-                FROM messages m
-                JOIN conversations c ON m.conversation_id = c.id
-                WHERE c.user_id = %s AND m.is_user = 1 
-                      AND m.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                ORDER BY m.created_at DESC
-            """
-            return self.db.execute_query(query, (user_id, days))
-        except Exception as e:
-            logger.error(f"Failed to get user query patterns: {str(e)}")
-            return []
-
-    def get_related_conversations(self, user_id: int, keywords: List[str],
-                                  exclude_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        if not self.db:
-            logger.warning("get_related_conversations: In-memory implementation is basic and may not be efficient.")
-            related = []
-            for conv_id, conv_data in self._memory_conversations.items():
-                if conv_data['user_id'] == user_id and (exclude_id is None or conv_id != exclude_id):
-                    # Check title
-                    match = any(kw.lower() in conv_data['title'].lower() for kw in keywords)
-                    # Check messages
-                    if not match:
-                        for msg_data in self._memory_messages.get(conv_id, []):
-                            if any(kw.lower() in msg_data['content'].lower() for kw in keywords):
-                                match = True
-                                break
-                    if match:
-                        last_resp = None
-                        for msg_data in reversed(self._memory_messages.get(conv_id, [])):
-                            if not msg_data['is_user']:
-                                last_resp = msg_data['content']
-                                break
-                        related.append({
-                            'id': conv_id, 'title': conv_data['title'],
-                            'updated_at': conv_data['updated_at'], 'last_response': last_resp
-                        })
-            related.sort(key=lambda r: r['updated_at'], reverse=True)
-            return related[:5]  # Limit to 5
-
-        # DB implementation remains
-        try:
-            keyword_conditions = []
-            params: List[Any] = [user_id]  # params 应该是 List[Any]
-
-            for keyword in keywords:
-                keyword_conditions.append("(c.title LIKE %s OR m.content LIKE %s)")
-                params.extend([f"%{keyword}%", f"%{keyword}%"])
-
-            exclude_condition = ""
-            if exclude_id is not None:  # 明确检查是否为 None
-                exclude_condition = "AND c.id != %s"
-                params.append(exclude_id)
-
-            query = f"""
-                SELECT DISTINCT c.id, c.title, c.updated_at,
+                SELECT c.id, c.title, c.user_id, c.created_at, c.updated_at, c.status,
                        (SELECT content FROM messages
                         WHERE conversation_id = c.id AND is_user = 0
-                        ORDER BY created_at DESC LIMIT 1) as last_response
+                        ORDER BY created_at DESC LIMIT 1) as last_ai_message,
+                       (SELECT COUNT(*) FROM messages
+                        WHERE conversation_id = c.id) as message_count,
+                       (SELECT COUNT(DISTINCT ai_model_used) FROM messages
+                        WHERE conversation_id = c.id AND ai_model_used IS NOT NULL) as ai_models_used
                 FROM conversations c
-                JOIN messages m ON c.id = m.conversation_id
-                WHERE c.user_id = %s AND ({' OR '.join(keyword_conditions)})
-                      {exclude_condition}
                 ORDER BY c.updated_at DESC
-                LIMIT 5
+                LIMIT %s OFFSET %s
             """
-            return self.db.execute_query(query, tuple(params))  # execute_query 需要元组参数
+            conversations = self.db.execute_query(query, (limit, offset))
+            for conv in conversations: 
+                conv['status'] = 'active' if conv.get('status', 1) == 1 else 'archived'
+                # 确保ID是字符串格式，并添加conversation_id字段
+                conv['id'] = str(conv['id'])
+                conv['conversation_id'] = conv['id']  # 添加前端期望的字段
+            logger.debug(f"DB: Retrieved {len(conversations)} conversations")
+            return conversations
         except Exception as e:
-            logger.error(f"Failed to get related conversations: {str(e)}")
+            logger.error(f"Failed to get all conversations: {str(e)}")
             return []
-
-    def update_conversation_title(self, conversation_id: int, new_title: str) -> bool:
-        if not self.db:
-            if conversation_id in self._memory_conversations:
-                self._memory_conversations[conversation_id]['title'] = new_title
-                self._memory_conversations[conversation_id]['updated_at'] = datetime.now()
-                logger.info(f"Updated in-memory conversation {conversation_id} title to: {new_title}")
-                return True
-            return False
-        try:
-            query = "UPDATE conversations SET title = %s, updated_at = NOW() WHERE id = %s"
-            affected = self.db.execute_update(query, (new_title, conversation_id))
-            logger.info(f"DB: Updated conversation {conversation_id} title to: {new_title}")
-            return affected > 0
-        except Exception as e:
-            logger.error(f"Failed to update DB conversation title for {conversation_id}: {str(e)}")
-            return False
-
-    def delete_conversation(self, conversation_id: int) -> bool:
-        if not self.db:
-            if conversation_id in self._memory_conversations:
-                del self._memory_conversations[conversation_id]
-                if conversation_id in self._memory_messages:
-                    del self._memory_messages[conversation_id]
-                logger.info(f"Deleted in-memory conversation {conversation_id}")
-                return True
-            return False
-        try:
-            # DB会自动通过外键CASCADE删除messages和message_visuals
-            query = "DELETE FROM conversations WHERE id = %s"
-            affected = self.db.execute_update(query, (conversation_id,))
-            logger.info(f"DB: Deleted conversation {conversation_id}")
-            return affected > 0
-        except Exception as e:
-            logger.error(f"Failed to delete DB conversation {conversation_id}: {str(e)}")
-            return False
 
     def _get_message_visuals(self, message_id: int) -> List[Dict[str, Any]]:
         """获取消息的可视化元素。内存模式下，visuals直接在消息中。"""

@@ -7,7 +7,7 @@
 - AI数据验证和预处理
 - 为分析优化的数据格式转换
 
-增强特点:
+增强特点：
 - 🧠 AI驱动的数据获取策略
 - 🔍 智能数据质量检查
 - ⚡ 优化的数据预处理流程
@@ -120,10 +120,22 @@ class APIConnector:
 
     async def _get_session(self):
         """获取或创建aiohttp会话"""
-        if self.session is None or self.session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.config.get('timeout', 30))
-            self.session = aiohttp.ClientSession(timeout=timeout)
-        return self.session
+        try:
+            if self.session is None or self.session.closed:
+                # 检查事件循环是否正在运行
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_closed():
+                        raise RuntimeError("Event loop is closed")
+                except RuntimeError:
+                    raise RuntimeError("No running event loop")
+                    
+                timeout = aiohttp.ClientTimeout(total=self.config.get('timeout', 30))
+                self.session = aiohttp.ClientSession(timeout=timeout)
+            return self.session
+        except Exception as e:
+            logger.error(f"Failed to get or create session: {str(e)}")
+            raise
 
     def _generate_cache_key(self, endpoint: str, params: Dict = None) -> str:
         """生成缓存键"""
@@ -195,7 +207,16 @@ class APIConnector:
 
         # 并发控制
         async with self.semaphore:
-            session = await self._get_session()
+            try:
+                session = await self._get_session()
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e):
+                    logger.error(f"Cannot make request to {endpoint}: Event loop is closed")
+                    return {
+                        "success": False,
+                        "message": "Cannot process request: Event loop is closed"
+                    }
+                raise
 
             # 重试机制
             max_retries = self.config.get('max_retries', 3)
@@ -249,6 +270,20 @@ class APIConnector:
                         else:
                             raise aiohttp.ClientError(f"HTTP {response.status}")
 
+                except asyncio.CancelledError:
+                    logger.warning(f"Request to {endpoint} was cancelled")
+                    return {
+                        "success": False,
+                        "message": "Request cancelled"
+                    }
+                except RuntimeError as e:
+                    if "Event loop is closed" in str(e):
+                        logger.error(f"Cannot continue request to {endpoint}: Event loop is closed")
+                        return {
+                            "success": False,
+                            "message": "Cannot process request: Event loop is closed"
+                        }
+                    logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
                 except Exception as e:
                     logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
 
@@ -261,7 +296,14 @@ class APIConnector:
                         }
 
                     # 等待后重试
-                    await asyncio.sleep(retry_delay * (2 ** attempt))
+                    try:
+                        await asyncio.sleep(retry_delay * (2 ** attempt))
+                    except asyncio.CancelledError:
+                        logger.warning(f"Sleep before retry was cancelled for {endpoint}")
+                        return {
+                            "success": False,
+                            "message": "Request retry cancelled"
+                        }
 
     # ============= 🆕 新增第8个API方法 =============
 
