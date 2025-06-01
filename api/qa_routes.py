@@ -1,6 +1,6 @@
 # api/qa_routes.py - 完整版本（包含user_id角色标识）
 from flask import Blueprint, jsonify, request
-from core.orchestrator.intelligent_qa_orchestrator import get_orchestrator, ProcessingResult
+from core.orchestrator.intelligent_qa_orchestrator import ProcessingResult, get_orchestrator
 import asyncio
 import logging
 import traceback
@@ -18,20 +18,81 @@ orchestrator = get_orchestrator()
 
 
 # ============= 工具函数 =============
-
 def async_route(f):
-    """异步路由装饰器，用于在Flask中正确运行async函数。"""
+    """异步路由装饰器 - 修复事件循环问题"""
 
     def wrapper(*args, **kwargs):
-        # 为每个请求创建一个新的事件循环，以避免在某些环境中（如某些WSGI服务器）出现问题
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(f(*args, **kwargs))
-        finally:
-            loop.close()
+        import asyncio
+        import threading
+        import concurrent.futures
+        import signal
 
-    wrapper.__name__ = f.__name__  # 保留原函数名，有助于调试
+        def run_async_in_thread():
+            """在新线程中运行异步函数"""
+            # 为新线程创建新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # 🔧 修复：设置信号处理，避免事件循环被意外关闭
+            def signal_handler(signum, frame):
+                logger.warning(f"Received signal {signum}, gracefully closing loop")
+                if not loop.is_closed():
+                    loop.stop()
+
+            try:
+                # 在某些环境中注册信号处理器
+                try:
+                    signal.signal(signal.SIGTERM, signal_handler)
+                    signal.signal(signal.SIGINT, signal_handler)
+                except:
+                    pass  # 在某些环境中可能无法设置信号处理器
+
+                return loop.run_until_complete(f(*args, **kwargs))
+            except Exception as e:
+                logger.error(f"Async function execution failed: {e}")
+                raise
+            finally:
+                try:
+                    # 🔧 修复：确保清理挂起的任务
+                    pending = asyncio.all_tasks(loop)
+                    if pending:
+                        logger.info(f"Cleaning up {len(pending)} pending tasks")
+                        for task in pending:
+                            task.cancel()
+
+                        # 等待任务完成取消
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+                    loop.close()
+                except Exception as e:
+                    logger.error(f"Error during loop cleanup: {e}")
+
+        try:
+            # 检查当前是否有运行的事件循环
+            current_loop = asyncio.get_running_loop()
+            # 如果有，使用线程池运行
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_async_in_thread)
+                return future.result(timeout=300)  # 5分钟超时
+        except RuntimeError:
+            # 没有运行的事件循环，直接运行
+            try:
+                return asyncio.run(f(*args, **kwargs))
+            except Exception as e:
+                logger.error(f"Direct asyncio.run failed: {e}")
+                # 最后的降级方案：使用线程
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(run_async_in_thread)
+                    return future.result(timeout=300)
+        except Exception as e:
+            logger.error(f"Async route execution failed: {e}")
+            return create_api_error_response(
+                f"请求处理失败: {str(e)}",
+                "async_execution_error",
+                500
+            )
+
+    wrapper.__name__ = f.__name__
     return wrapper
 
 
@@ -337,9 +398,9 @@ async def get_conversation_details(conversation_id_str: str):
 async def get_user_conversation_list(user_id: int):
     """
     📋 获取指定角色的所有对话列表（支持分页）。
-    参数:
+    参数：
     - user_id: 角色标识 (0=用户, 1=系统)
-    查询参数:
+    查询参数：
     - limit (int, 可选, 默认20, 范围 1-100): 每页数量。
     - offset (int, 可选, 默认0, >=0): 偏移量。
     """
@@ -398,7 +459,7 @@ async def get_user_conversation_list(user_id: int):
 async def get_all_conversations():
     """
     📋 获取所有对话列表（支持分页）- 不区分角色。
-    查询参数:
+    查询参数：
     - limit (int, 可选, 默认20, 范围 1-100): 每页数量。
     - offset (int, 可选, 默认0, >=0): 偏移量。
     - user_id (int, 可选): 按角色过滤 (0=用户, 1=系统)

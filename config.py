@@ -35,15 +35,35 @@ class Config:
         'cache_ttl': 3600  # 缓存时间（秒）
     }
 
+    # 🆕 响应详细程度配置
+    DETAILED_RESPONSE_MODE = os.getenv('DETAILED_RESPONSE_MODE', 'True').lower() == 'true'
+    SHOW_CALCULATION_STEPS = os.getenv('SHOW_CALCULATION_STEPS', 'True').lower() == 'true'
+    SHOW_DATA_SOURCES = os.getenv('SHOW_DATA_SOURCES', 'True').lower() == 'true'
+    SHOW_VALIDATION_INFO = os.getenv('SHOW_VALIDATION_INFO', 'True').lower() == 'true'
+    SHOW_BUSINESS_INSIGHTS = os.getenv('SHOW_BUSINESS_INSIGHTS', 'True').lower() == 'true'
+    SHOW_DATA_QUALITY_INFO = os.getenv('SHOW_DATA_QUALITY_INFO', 'True').lower() == 'true'
+
 
 class DevelopmentConfig(Config):
     DEBUG = True
     LOG_LEVEL = 'DEBUG'
 
+    # 🆕 开发环境：默认启用所有详细信息
+    DETAILED_RESPONSE_MODE = True
+    SHOW_CALCULATION_STEPS = True
+    SHOW_DATA_SOURCES = True
+    SHOW_VALIDATION_INFO = True
+
 
 class ProductionConfig(Config):
     DEBUG = False
     LOG_LEVEL = 'INFO'
+
+    # 🆕 生产环境：可以选择性关闭一些详细信息以提高性能
+    DETAILED_RESPONSE_MODE = True
+    SHOW_CALCULATION_STEPS = True
+    SHOW_DATA_SOURCES = True
+    SHOW_VALIDATION_INFO = False  # 生产环境可以关闭验证信息显示
 
 
 config = {

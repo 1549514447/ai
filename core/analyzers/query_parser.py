@@ -21,6 +21,7 @@ from enum import Enum
 
 # 导入AI客户端和工具
 from core.models.claude_client import ClaudeClient
+from core.models.openai_client import OpenAIClient
 from utils.helpers.date_utils import DateUtils, create_date_utils
 
 logger = logging.getLogger(__name__)
@@ -758,59 +759,3 @@ def create_smart_query_parser(claude_client: Optional[ClaudeClient] = None,
     """
     return SmartQueryParser(claude_client, gpt_client)
 
-
-# ============= 使用示例 =============
-
-async def example_usage():
-    """使用示例"""
-    from core.models.claude_client import ClaudeClient
-
-    # 创建解析器（需要实际的Claude客户端）
-    claude_client = ClaudeClient()  # 需要配置API密钥
-    parser = create_smart_query_parser(claude_client)
-
-    # 测试查询
-    test_queries = [
-        "今天的总余额是多少？",  # Simple
-        "过去30天的用户增长趋势如何？",  # Medium with time range
-        "基于历史数据预测下个月的资金缺口",  # Complex
-        "明天有哪些产品到期？",  # Product expiry
-        "当前用户活跃度情况"  # User analysis
-    ]
-
-    for query in test_queries:
-        print(f"\n测试查询: {query}")
-
-        # 验证查询
-        validation = await parser.validate_query(query)
-        if not validation['valid']:
-            print(f"验证失败: {validation['error']}")
-            continue
-
-        # 解析查询
-        result = await parser.parse_complex_query(query)
-        print(f"类型: {result.query_type.value}")
-        print(f"复杂度: {result.complexity.value}")
-        print(f"场景: {result.business_scenario.value}")
-        print(f"API调用: {len(result.api_calls_needed)}个")
-        for api_call in result.api_calls_needed:
-            print(f"  - {api_call['method']}({api_call['params']}) - {api_call['reason']}")
-        print(f"需要计算: {result.needs_calculation}")
-        if result.needs_calculation:
-            print(f"计算类型: {result.calculation_type}")
-        print(f"置信度: {result.confidence_score:.2f}")
-        print(f"处理方法: {result.processing_metadata.get('processing_method', 'N/A')}")
-
-    # 显示统计信息
-    stats = parser.get_processing_stats()
-    print(f"\n=== 处理统计 ===")
-    print(f"总查询数: {stats['total_queries']}")
-    print(f"成功率: {stats['success_rate']:.1%}")
-    print(f"降级率: {stats['fallback_rate']:.1%}")
-    print(f"Claude失败率: {stats['claude_failure_rate']:.1%}")
-    print(f"平均置信度: {stats['average_confidence']:.2f}")
-
-
-if __name__ == "__main__":
-    # 运行示例
-    asyncio.run(example_usage())

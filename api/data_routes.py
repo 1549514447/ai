@@ -12,8 +12,8 @@ import re
 # 导入编排器 - 核心改动！
 from core.orchestrator.intelligent_qa_orchestrator import get_orchestrator
 # 导入报告和图表相关的枚举和工具（如果需要直接在数据路由中使用）
-from utils.formatters.report_generator import ReportFormat
-from utils.formatters.chart_generator import ChartType
+# from utils.formatters.report_generator import ReportFormat
+# from utils.formatters.chart_generator import ChartType
 
 logger = logging.getLogger(__name__)
 
@@ -768,231 +768,231 @@ async def get_enhanced_analytics_data():
 # generate-report 和 generate-data-report 路由目前看起来耦合了数据获取和报告生成。
 # 在一个更纯粹的 "data_routes" 中，它们可能只负责提供格式化的数据给前端或另一个服务来生成报告。
 # 但既然它们在这里，我会确保它们使用 orchestrator 的组件。
-
-@data_bp.route('/generate-report', methods=['POST'])
-@async_route
-async def generate_analysis_report():
-    """
-    📊 生成分析报告 - 基于提供的分析数据或触发新的分析来创建专业报告
-    请求体 (JSON):
-    {
-        "report_type": "financial" | "trend" | "comparison", // 报告类型
-        "data": {}, // 用于生成报告的数据，如果为空，则系统会尝试获取默认数据
-        "title": "自定义报告标题", // 可选
-        "format": "html" | "pdf" | "markdown", // 输出格式，默认html
-        "time_range_days": 30 // 如果data为空，用于获取数据的默认时间范围
-    }
-    """
-    try:
-        logger.info("📊 API: 请求生成分析报告...")
-        if not orchestrator.initialized:
-            await orchestrator.initialize()
-
-        params = validate_request_params(
-            required_params=['report_type'],
-            optional_params={
-                'data': {'type': dict, 'default': {}},
-                'title': {'type': str, 'default': '数据分析报告'},
-                'format': {'type': str, 'default': 'html', 'allowed': ['html', 'pdf', 'markdown']},
-                'time_range_days': {'type': int, 'default': 30},
-                'period': {'type': str}  # For trend reports
-            }
-        )
-        report_type = params['report_type']
-        report_data_from_request = params['data']
-        report_title = params['title']
-        report_format_str = params['format']
-        time_range_days = params['time_range_days']
-        period_for_trend = params.get('period')
-
-        valid_report_types = ['financial', 'trend', 'comparison']
-        if report_type not in valid_report_types:
-            return create_error_response(f"无效的报告类型: {report_type}", "validation_error", 400)
-
-        # 如果请求中没有提供数据，则尝试获取数据
-        if not report_data_from_request:
-            logger.info(f"未提供报告数据，将为'{report_type}'类型报告获取默认数据...")
-            # 这是一个简化的数据获取逻辑，实际可能更复杂
-            if report_type == 'financial':
-                financial_performance = await orchestrator.financial_data_analyzer.analyze_business_performance(
-                    'financial', time_range_days)
-                # 将AnalysisResult转换为generate_financial_report期望的字典格式
-                report_data_from_request = {
-                    'subtitle': f"{time_range_days}天财务表现",
-                    'summary': {'content': '; '.join(financial_performance.key_findings),
-                                'key_metrics': [{'name': k, 'value': v, 'format_type': 'auto'} for k, v in
-                                                financial_performance.metrics.items()]},
-                    'analysis_sections': [{'title': '趋势分析', 'content': '; '.join(
-                        t.get('direction', 'stable') for t in financial_performance.trends),
-                                           'charts': []}] if financial_performance.trends else []
-                }
-            elif report_type == 'trend':
-                trend_analysis = await orchestrator.financial_data_analyzer.analyze_trend('system', 'total_balance',
-                                                                                          time_range_days)
-                # 转换为generate_trend_report期望的格式
-                report_data_from_request = {
-                    'summary': {'content': '; '.join(trend_analysis.key_findings)},
-                    'trends': [{'title': trend_analysis.metrics.get('metric_name', '趋势'),
-                                'description': trend_analysis.trends[0].get('direction', '未知'),
-                                'data': trend_analysis.metrics.get('supporting_data',
-                                                                   [])}] if trend_analysis.trends else []
-                }
-                if not period_for_trend: period_for_trend = f"最近{time_range_days}天"
-
-            # 可以为 'comparison' 类型添加类似的数据获取逻辑
-            else:
-                logger.warning(f"报告类型 '{report_type}' 的自动数据获取未完全实现，可能导致报告数据不足。")
-                # 获取通用系统数据作为基础
-                system_data_res = await orchestrator.data_fetcher.api_connector.get_system_data()
-                if system_data_res.get("success"):
-                    report_data_from_request = system_data_res["data"]
-                else:
-                    return create_error_response("自动获取报告数据失败", "data_fetch_error", 500)
-
-        output_format_enum = ReportFormat[report_format_str.upper()]
-
-        # 使用编排器中的报告生成器
-        report_object = None
-        if report_type == 'financial':
-            report_object = orchestrator.report_generator.generate_financial_report(
-                data=report_data_from_request, title=report_title, output_format=output_format_enum
-            )
-        elif report_type == 'trend':
-            report_object = orchestrator.report_generator.generate_trend_report(
-                trend_data=report_data_from_request, title=report_title, period=period_for_trend,
-                output_format=output_format_enum
-            )
-        elif report_type == 'comparison':
-            report_object = orchestrator.report_generator.generate_comparison_report(
-                comparison_data=report_data_from_request, title=report_title, output_format=output_format_enum
-            )
-
-        if not report_object:
-            return create_error_response(f"无法为类型 '{report_type}' 生成报告对象", "report_generation_error", 500)
-
-        report_content = ""
-        if output_format_enum == ReportFormat.HTML:
-            report_content = report_object.to_html()
-            mimetype = 'text/html'
-        elif output_format_enum == ReportFormat.MARKDOWN:
-            report_content = report_object.to_markdown()
-            mimetype = 'text/markdown'
-        elif output_format_enum == ReportFormat.PDF:
-            import tempfile, os
-            temp_dir = tempfile.gettempdir()
-            # 确保文件名是唯一的，并且有.pdf扩展名
-            timestamp = int(time.time())
-            filename = f"report_{timestamp}.pdf"
-            temp_file_path = os.path.join(temp_dir, filename)
-
-            try:
-                # report_object.to_pdf(temp_file_path) # generate_financial_report等方法若指定output_path则直接保存
-                # 我们需要先获得 Report 对象，然后调用其 to_pdf 方法
-                if isinstance(report_object, str) and os.path.exists(report_object):  # 如果生成器方法直接返回路径
-                    temp_file_path = report_object
-                else:  # 假设 report_object 是 Report 类的实例
-                    report_object.to_pdf(temp_file_path)
-
-                with open(temp_file_path, 'rb') as f:
-                    report_content_bytes = f.read()
-
-                # 可选：删除临时文件
-                # os.remove(temp_file_path)
-
-                # 对于PDF，通常是作为文件下载，或返回文件路径/链接
-                # 这里为了API一致性，可以返回一个消息指示PDF已生成，或base64编码
-                # 为了简单，这里返回一个指示消息，实际应用中可能需要文件服务
-                return create_success_response({
-                    'message': 'PDF报告已生成，请通过指定路径或后续机制获取。',
-                    'report_path_info': temp_file_path,  # 仅用于演示，生产环境不应直接暴露临时文件路径
-                    'report_type': report_type,
-                    'format': report_format_str
-                }, "PDF报告处理完成")
-
-            except Exception as pdf_err:
-                logger.error(f"PDF报告生成或读取失败: {pdf_err}\n{traceback.format_exc()}")
-                return create_error_response(f"PDF报告生成失败: {pdf_err}", "report_generation_error", 500)
-
-        logger.info(f"✅ API: {report_type}报告生成完成，格式: {report_format_str}")
-        return Response(report_content, mimetype=mimetype) if report_format_str != 'pdf' else \
-            create_error_response("PDF生成逻辑需要调整以适配Response", "internal_error", 500)  # PDF case handled above
-
-    except ValueError as e:
-        return create_error_response(str(e), "validation_error", 400)
-    except Exception as e:
-        logger.error(f"❌ API: 分析报告生成失败: {str(e)}\n{traceback.format_exc()}")
-        return create_error_response(f"报告生成失败: {str(e)}", "report_generation_error", 500)
-
-
-@data_bp.route('/generate-chart', methods=['POST'])
-@async_route
-async def generate_data_chart():
-    """
-    🎨 生成数据图表 - 基于提供的数据和配置智能生成图表
-    请求体 (JSON):
-    {
-        "data": {}, // 用于图表的数据，例如 {"labels": ["A", "B"], "values": [10, 20]}
-        "chart_type": "line", // 图表类型 (line, bar, pie, etc.)，或 "auto"
-        "title": "图表标题", // 可选
-        "config": {}, // 图表库特定的配置，可选
-        "preferences": {"theme": "financial"} // 可选的用户偏好
-    }
-    """
-    try:
-        logger.info("🎨 API: 请求生成数据图表...")
-        if not orchestrator.initialized:
-            await orchestrator.initialize()
-
-        params = validate_request_params(
-            required_params=['data'],
-            optional_params={
-                'chart_type': {'type': str, 'default': 'auto'},
-                'title': {'type': str, 'default': '数据图表'},
-                'config': {'type': dict, 'default': {}},
-                'preferences': {'type': dict, 'default': {}}
-            }
-        )
-        chart_data = params['data']
-        chart_type_str = params['chart_type']
-        chart_title = params['title']
-        chart_config_extra = params['config']
-        chart_preferences = params['preferences']
-
-        # 将字符串的 chart_type 转换为 ChartType 枚举，如果它是有效成员的话
-        try:
-            chart_type_enum = ChartType[chart_type_str.upper()] if chart_type_str != 'auto' else None
-        except KeyError:
-            return create_error_response(f"不支持的图表类型: {chart_type_str}", "validation_error", 400)
-
-        # 使用编排器中的图表生成器
-        # ChartGenerator.py (utils/formatters)的 generate_chart 方法
-        chart_result = orchestrator.chart_generator.generate_chart(
-            data=chart_data,
-            chart_type=chart_type_enum,  # 传递枚举或None
-            title=chart_title,
-            config=chart_config_extra
-        )
-
-        if not chart_result or chart_result.get("error"):
-            return create_error_response(chart_result.get("error", "图表生成失败"), "chart_generation_error", 500)
-
-        # image_data 包含了 base64, svg, 或 binary, 以及 format
-        # 根据前端需求，可能返回base64编码的图片或图表配置本身
-        response_data = {
-            'chart_type_generated': chart_result.get('type', chart_type_str),
-            'title': chart_result.get('title', chart_title),
-            'image_data': chart_result.get('image_data'),  # { "base64": "...", "format": "png" } or { "svg": "..." }
-            'raw_chart_config': chart_result.get('chart_config_for_frontend')  # 如果图表库返回前端可渲染的配置
-        }
-
-        logger.info(f"✅ API: 图表生成完成: {response_data['chart_type_generated']}")
-        return create_success_response(response_data, "图表生成成功")
-
-    except ValueError as e:
-        return create_error_response(str(e), "validation_error", 400)
-    except Exception as e:
-        logger.error(f"❌ API: 图表生成失败: {str(e)}\n{traceback.format_exc()}")
-        return create_error_response(f"图表生成失败: {str(e)}", "chart_generation_error", 500)
+#
+# @data_bp.route('/generate-report', methods=['POST'])
+# @async_route
+# async def generate_analysis_report():
+#     """
+#     📊 生成分析报告 - 基于提供的分析数据或触发新的分析来创建专业报告
+#     请求体 (JSON):
+#     {
+#         "report_type": "financial" | "trend" | "comparison", // 报告类型
+#         "data": {}, // 用于生成报告的数据，如果为空，则系统会尝试获取默认数据
+#         "title": "自定义报告标题", // 可选
+#         "format": "html" | "pdf" | "markdown", // 输出格式，默认html
+#         "time_range_days": 30 // 如果data为空，用于获取数据的默认时间范围
+#     }
+#     """
+#     try:
+#         logger.info("📊 API: 请求生成分析报告...")
+#         if not orchestrator.initialized:
+#             await orchestrator.initialize()
+#
+#         params = validate_request_params(
+#             required_params=['report_type'],
+#             optional_params={
+#                 'data': {'type': dict, 'default': {}},
+#                 'title': {'type': str, 'default': '数据分析报告'},
+#                 'format': {'type': str, 'default': 'html', 'allowed': ['html', 'pdf', 'markdown']},
+#                 'time_range_days': {'type': int, 'default': 30},
+#                 'period': {'type': str}  # For trend reports
+#             }
+#         )
+#         report_type = params['report_type']
+#         report_data_from_request = params['data']
+#         report_title = params['title']
+#         report_format_str = params['format']
+#         time_range_days = params['time_range_days']
+#         period_for_trend = params.get('period')
+#
+#         valid_report_types = ['financial', 'trend', 'comparison']
+#         if report_type not in valid_report_types:
+#             return create_error_response(f"无效的报告类型: {report_type}", "validation_error", 400)
+#
+#         # 如果请求中没有提供数据，则尝试获取数据
+#         if not report_data_from_request:
+#             logger.info(f"未提供报告数据，将为'{report_type}'类型报告获取默认数据...")
+#             # 这是一个简化的数据获取逻辑，实际可能更复杂
+#             if report_type == 'financial':
+#                 financial_performance = await orchestrator.financial_data_analyzer.analyze_business_performance(
+#                     'financial', time_range_days)
+#                 # 将AnalysisResult转换为generate_financial_report期望的字典格式
+#                 report_data_from_request = {
+#                     'subtitle': f"{time_range_days}天财务表现",
+#                     'summary': {'content': '; '.join(financial_performance.key_findings),
+#                                 'key_metrics': [{'name': k, 'value': v, 'format_type': 'auto'} for k, v in
+#                                                 financial_performance.metrics.items()]},
+#                     'analysis_sections': [{'title': '趋势分析', 'content': '; '.join(
+#                         t.get('direction', 'stable') for t in financial_performance.trends),
+#                                            'charts': []}] if financial_performance.trends else []
+#                 }
+#             elif report_type == 'trend':
+#                 trend_analysis = await orchestrator.financial_data_analyzer.analyze_trend('system', 'total_balance',
+#                                                                                           time_range_days)
+#                 # 转换为generate_trend_report期望的格式
+#                 report_data_from_request = {
+#                     'summary': {'content': '; '.join(trend_analysis.key_findings)},
+#                     'trends': [{'title': trend_analysis.metrics.get('metric_name', '趋势'),
+#                                 'description': trend_analysis.trends[0].get('direction', '未知'),
+#                                 'data': trend_analysis.metrics.get('supporting_data',
+#                                                                    [])}] if trend_analysis.trends else []
+#                 }
+#                 if not period_for_trend: period_for_trend = f"最近{time_range_days}天"
+#
+#             # 可以为 'comparison' 类型添加类似的数据获取逻辑
+#             else:
+#                 logger.warning(f"报告类型 '{report_type}' 的自动数据获取未完全实现，可能导致报告数据不足。")
+#                 # 获取通用系统数据作为基础
+#                 system_data_res = await orchestrator.data_fetcher.api_connector.get_system_data()
+#                 if system_data_res.get("success"):
+#                     report_data_from_request = system_data_res["data"]
+#                 else:
+#                     return create_error_response("自动获取报告数据失败", "data_fetch_error", 500)
+#
+#         output_format_enum = ReportFormat[report_format_str.upper()]
+#
+#         # 使用编排器中的报告生成器
+#         report_object = None
+#         if report_type == 'financial':
+#             report_object = orchestrator.report_generator.generate_financial_report(
+#                 data=report_data_from_request, title=report_title, output_format=output_format_enum
+#             )
+#         elif report_type == 'trend':
+#             report_object = orchestrator.report_generator.generate_trend_report(
+#                 trend_data=report_data_from_request, title=report_title, period=period_for_trend,
+#                 output_format=output_format_enum
+#             )
+#         elif report_type == 'comparison':
+#             report_object = orchestrator.report_generator.generate_comparison_report(
+#                 comparison_data=report_data_from_request, title=report_title, output_format=output_format_enum
+#             )
+#
+#         if not report_object:
+#             return create_error_response(f"无法为类型 '{report_type}' 生成报告对象", "report_generation_error", 500)
+#
+#         report_content = ""
+#         if output_format_enum == ReportFormat.HTML:
+#             report_content = report_object.to_html()
+#             mimetype = 'text/html'
+#         elif output_format_enum == ReportFormat.MARKDOWN:
+#             report_content = report_object.to_markdown()
+#             mimetype = 'text/markdown'
+#         elif output_format_enum == ReportFormat.PDF:
+#             import tempfile, os
+#             temp_dir = tempfile.gettempdir()
+#             # 确保文件名是唯一的，并且有.pdf扩展名
+#             timestamp = int(time.time())
+#             filename = f"report_{timestamp}.pdf"
+#             temp_file_path = os.path.join(temp_dir, filename)
+#
+#             try:
+#                 # report_object.to_pdf(temp_file_path) # generate_financial_report等方法若指定output_path则直接保存
+#                 # 我们需要先获得 Report 对象，然后调用其 to_pdf 方法
+#                 if isinstance(report_object, str) and os.path.exists(report_object):  # 如果生成器方法直接返回路径
+#                     temp_file_path = report_object
+#                 else:  # 假设 report_object 是 Report 类的实例
+#                     report_object.to_pdf(temp_file_path)
+#
+#                 with open(temp_file_path, 'rb') as f:
+#                     report_content_bytes = f.read()
+#
+#                 # 可选：删除临时文件
+#                 # os.remove(temp_file_path)
+#
+#                 # 对于PDF，通常是作为文件下载，或返回文件路径/链接
+#                 # 这里为了API一致性，可以返回一个消息指示PDF已生成，或base64编码
+#                 # 为了简单，这里返回一个指示消息，实际应用中可能需要文件服务
+#                 return create_success_response({
+#                     'message': 'PDF报告已生成，请通过指定路径或后续机制获取。',
+#                     'report_path_info': temp_file_path,  # 仅用于演示，生产环境不应直接暴露临时文件路径
+#                     'report_type': report_type,
+#                     'format': report_format_str
+#                 }, "PDF报告处理完成")
+#
+#             except Exception as pdf_err:
+#                 logger.error(f"PDF报告生成或读取失败: {pdf_err}\n{traceback.format_exc()}")
+#                 return create_error_response(f"PDF报告生成失败: {pdf_err}", "report_generation_error", 500)
+#
+#         logger.info(f"✅ API: {report_type}报告生成完成，格式: {report_format_str}")
+#         return Response(report_content, mimetype=mimetype) if report_format_str != 'pdf' else \
+#             create_error_response("PDF生成逻辑需要调整以适配Response", "internal_error", 500)  # PDF case handled above
+#
+#     except ValueError as e:
+#         return create_error_response(str(e), "validation_error", 400)
+#     except Exception as e:
+#         logger.error(f"❌ API: 分析报告生成失败: {str(e)}\n{traceback.format_exc()}")
+#         return create_error_response(f"报告生成失败: {str(e)}", "report_generation_error", 500)
+#
+#
+# @data_bp.route('/generate-chart', methods=['POST'])
+# @async_route
+# async def generate_data_chart():
+#     """
+#     🎨 生成数据图表 - 基于提供的数据和配置智能生成图表
+#     请求体 (JSON):
+#     {
+#         "data": {}, // 用于图表的数据，例如 {"labels": ["A", "B"], "values": [10, 20]}
+#         "chart_type": "line", // 图表类型 (line, bar, pie, etc.)，或 "auto"
+#         "title": "图表标题", // 可选
+#         "config": {}, // 图表库特定的配置，可选
+#         "preferences": {"theme": "financial"} // 可选的用户偏好
+#     }
+#     """
+#     try:
+#         logger.info("🎨 API: 请求生成数据图表...")
+#         if not orchestrator.initialized:
+#             await orchestrator.initialize()
+#
+#         params = validate_request_params(
+#             required_params=['data'],
+#             optional_params={
+#                 'chart_type': {'type': str, 'default': 'auto'},
+#                 'title': {'type': str, 'default': '数据图表'},
+#                 'config': {'type': dict, 'default': {}},
+#                 'preferences': {'type': dict, 'default': {}}
+#             }
+#         )
+#         chart_data = params['data']
+#         chart_type_str = params['chart_type']
+#         chart_title = params['title']
+#         chart_config_extra = params['config']
+#         chart_preferences = params['preferences']
+#
+#         # 将字符串的 chart_type 转换为 ChartType 枚举，如果它是有效成员的话
+#         try:
+#             chart_type_enum = ChartType[chart_type_str.upper()] if chart_type_str != 'auto' else None
+#         except KeyError:
+#             return create_error_response(f"不支持的图表类型: {chart_type_str}", "validation_error", 400)
+#
+#         # 使用编排器中的图表生成器
+#         # ChartGenerator.py (utils/formatters)的 generate_chart 方法
+#         chart_result = orchestrator.chart_generator.generate_chart(
+#             data=chart_data,
+#             chart_type=chart_type_enum,  # 传递枚举或None
+#             title=chart_title,
+#             config=chart_config_extra
+#         )
+#
+#         if not chart_result or chart_result.get("error"):
+#             return create_error_response(chart_result.get("error", "图表生成失败"), "chart_generation_error", 500)
+#
+#         # image_data 包含了 base64, svg, 或 binary, 以及 format
+#         # 根据前端需求，可能返回base64编码的图片或图表配置本身
+#         response_data = {
+#             'chart_type_generated': chart_result.get('type', chart_type_str),
+#             'title': chart_result.get('title', chart_title),
+#             'image_data': chart_result.get('image_data'),  # { "base64": "...", "format": "png" } or { "svg": "..." }
+#             'raw_chart_config': chart_result.get('chart_config_for_frontend')  # 如果图表库返回前端可渲染的配置
+#         }
+#
+#         logger.info(f"✅ API: 图表生成完成: {response_data['chart_type_generated']}")
+#         return create_success_response(response_data, "图表生成成功")
+#
+#     except ValueError as e:
+#         return create_error_response(str(e), "validation_error", 400)
+#     except Exception as e:
+#         logger.error(f"❌ API: 图表生成失败: {str(e)}\n{traceback.format_exc()}")
+#         return create_error_response(f"图表生成失败: {str(e)}", "chart_generation_error", 500)
 
 
 # ============= 系统监控和状态API (可以保留或增强) =============

@@ -30,6 +30,7 @@ class CalculationType(Enum):
     BASIC_STATISTICS = "basic_statistics"
     TREND_ANALYSIS = "trend_analysis"
     GROWTH_CALCULATION = "growth_calculation"
+    COMPARISON_ANALYSIS = "comparison_analysis"  # 🆕 添加对比分析
 
     # 金融计算 (来自FinancialCalculator)
     COMPOUND_INTEREST = "compound_interest"
@@ -146,6 +147,8 @@ class UnifiedCalculator:
                 result = await self._calculate_basic_statistics(data, params)
             elif calculation_type == CalculationType.TREND_ANALYSIS.value:
                 result = await self._calculate_trend_analysis(data, params)
+            elif calculation_type == CalculationType.COMPARISON_ANALYSIS.value:  # 🆕 添加对比分析路由
+                result = await self._calculate_comparison_analysis(data, params)
             elif calculation_type == CalculationType.COMPOUND_INTEREST.value:
                 result = await self._calculate_compound_interest(data, params)
             elif calculation_type == CalculationType.REINVESTMENT_ANALYSIS.value:
@@ -199,6 +202,185 @@ class UnifiedCalculator:
                 warnings=[f"计算失败: {str(e)}"]
             )
 
+    # 🆕 添加对比分析计算方法
+    async def _calculate_comparison_analysis(self, data: Dict[str, Any],
+                                             params: Dict[str, Any]) -> UnifiedCalculationResult:
+        """🆕 对比分析计算 - 统一计算器版本"""
+        try:
+            logger.info("🆕 执行对比分析计算")
+
+            # 从提取的数据中获取对比信息
+            extracted_data = data.get('extracted_metrics', {})
+            comparison_analysis = data.get('comparison_analysis', {})
+
+            calculation_results = {}
+            insights = []
+
+            # 如果Claude提取器已经做了对比分析，直接使用
+            if comparison_analysis:
+                logger.info("使用Claude提取器的对比分析结果")
+                calculation_results = comparison_analysis
+
+                # 生成洞察
+                for metric, analysis in comparison_analysis.items():
+                    if isinstance(analysis, dict):
+                        current_val = analysis.get('current_value', 0)
+                        baseline_val = analysis.get('baseline_value', 0)
+                        change_rate = analysis.get('percentage_change', 0)
+                        direction = analysis.get('change_direction', '持平')
+
+                        insight = f"{metric}{direction}{abs(change_rate):.1%}，从{baseline_val:,.2f}变为{current_val:,.2f}"
+                        insights.append(insight)
+
+            # 如果没有现成的对比分析，尝试从原始数据构建
+            elif extracted_data:
+                logger.info("从原始数据构建对比分析")
+
+                # 查找本周和上周的数据
+                current_week_total = {}
+                last_week_total = {}
+
+                # 🔍 调试：打印所有键
+                logger.info(f"🔍 [DEBUG] extracted_data的所有键: {list(extracted_data.keys())}")
+
+                for key, value in extracted_data.items():
+                    if 'current_week' in key.lower():
+                        logger.info(f"🔍 [DEBUG] 发现本周数据: {key}")
+                        # 累加本周数据
+                        if isinstance(value, dict):
+                            for metric, amount in value.items():
+                                if isinstance(amount, (int, float)):
+                                    current_week_total[metric] = current_week_total.get(metric, 0) + amount
+                    elif 'last_week' in key.lower():
+                        logger.info(f"🔍 [DEBUG] 发现上周数据: {key}")
+                        # 累加上周数据
+                        if isinstance(value, dict):
+                            for metric, amount in value.items():
+                                if isinstance(amount, (int, float)):
+                                    last_week_total[metric] = last_week_total.get(metric, 0) + amount
+
+                logger.info(f"🔍 [DEBUG] 本周汇总: {current_week_total}")
+                logger.info(f"🔍 [DEBUG] 上周汇总: {last_week_total}")
+
+                # 计算对比
+                for metric in ['入金', '出金', '净流入', '注册人数']:
+                    if metric in current_week_total and metric in last_week_total:
+                        current_val = current_week_total[metric]
+                        last_val = last_week_total[metric]
+
+                        if last_val != 0:
+                            change_rate = (current_val - last_val) / last_val
+                            calculation_results[metric] = {
+                                'current_value': current_val,
+                                'baseline_value': last_val,
+                                'absolute_change': current_val - last_val,
+                                'percentage_change': change_rate,
+                                'change_direction': '增长' if change_rate > 0 else '下降' if change_rate < 0 else '持平'
+                            }
+
+                            insights.append(f"{metric}{'增长' if change_rate > 0 else '下降'}{abs(change_rate):.1%}")
+
+            # 🔍 特殊处理：如果仍然没有结果，查找数据结构
+            if not calculation_results:
+                logger.warning("🔍 [DEBUG] 常规方法未找到对比数据，尝试深度查找...")
+
+                # 尝试从results中查找
+                if 'results' in data:
+                    results = data['results']
+                    logger.info(f"🔍 [DEBUG] results中的键: {list(results.keys())}")
+
+                    # 聚合current_week和last_week的数据
+                    current_data = {}
+                    last_data = {}
+
+                    for result_key, result_value in results.items():
+                        if 'current_week' in result_key and result_value.get('success'):
+                            result_data = result_value.get('data', {})
+                            for metric in ['入金', '出金', '注册人数']:
+                                if metric in result_data:
+                                    current_data[metric] = current_data.get(metric, 0) + float(result_data[metric])
+
+                        elif 'last_week' in result_key and result_value.get('success'):
+                            result_data = result_value.get('data', {})
+                            for metric in ['入金', '出金', '注册人数']:
+                                if metric in result_data:
+                                    last_data[metric] = last_data.get(metric, 0) + float(result_data[metric])
+
+                    logger.info(f"🔍 [DEBUG] 从results聚合 - 本周: {current_data}, 上周: {last_data}")
+
+                    # 计算对比
+                    for metric in ['入金', '出金', '注册人数']:
+                        if metric in current_data and metric in last_data:
+                            current_val = current_data[metric]
+                            last_val = last_data[metric]
+
+                            if last_val != 0:
+                                change_rate = (current_val - last_val) / last_val
+                                calculation_results[metric] = {
+                                    'current_value': current_val,
+                                    'baseline_value': last_val,
+                                    'absolute_change': current_val - last_val,
+                                    'percentage_change': change_rate,
+                                    'change_direction': '增长' if change_rate > 0 else '下降' if change_rate < 0 else '持平'
+                                }
+
+                                insights.append(
+                                    f"{metric}{'增长' if change_rate > 0 else '下降'}{abs(change_rate):.1%}")
+
+                    # 计算净流入
+                    if '入金' in calculation_results and '出金' in calculation_results:
+                        current_net = calculation_results['入金']['current_value'] - calculation_results['出金'][
+                            'current_value']
+                        last_net = calculation_results['入金']['baseline_value'] - calculation_results['出金'][
+                            'baseline_value']
+
+                        if last_net != 0:
+                            net_change_rate = (current_net - last_net) / last_net
+                            calculation_results['净流入'] = {
+                                'current_value': current_net,
+                                'baseline_value': last_net,
+                                'absolute_change': current_net - last_net,
+                                'percentage_change': net_change_rate,
+                                'change_direction': '增长' if net_change_rate > 0 else '下降' if net_change_rate < 0 else '持平'
+                            }
+
+                            insights.append(
+                                f"净流入{'增长' if net_change_rate > 0 else '下降'}{abs(net_change_rate):.1%}")
+
+            if not calculation_results:
+                # 最终降级处理：提供基础统计信息
+                logger.warning("无法进行详细对比分析，提供基础统计")
+                calculation_results = {
+                    'summary': '对比分析数据不足，建议检查数据获取结果',
+                    'data_available': len(extracted_data),
+                    'available_keys': list(extracted_data.keys())[:5] if extracted_data else []
+                }
+                insights = ['数据获取可能不完整，请检查API调用结果']
+
+            return UnifiedCalculationResult(
+                calculation_type=CalculationType.COMPARISON_ANALYSIS.value,
+                success=True,
+                primary_result=len(calculation_results),
+                detailed_results=calculation_results,
+                metadata={
+                    'comparison_metrics_count': len(calculation_results),
+                    'data_source': 'claude_extractor' if comparison_analysis else 'unified_calculator_processing',
+                    'insights': insights
+                },
+                confidence=0.9 if comparison_analysis else (0.8 if len(calculation_results) > 1 else 0.6)
+            )
+
+        except Exception as e:
+            logger.error(f"对比分析计算失败: {str(e)}")
+            return UnifiedCalculationResult(
+                calculation_type=CalculationType.COMPARISON_ANALYSIS.value,
+                success=False,
+                primary_result=0.0,
+                detailed_results={'error': str(e)},
+                metadata={'error_details': str(e)},
+                confidence=0.0,
+                warnings=[f"对比分析计算失败: {str(e)}"]
+            )
     # ============= 高精度金融计算 (来自FinancialCalculator) =============
 
     async def _calculate_compound_interest(self, data: Dict[str, Any],

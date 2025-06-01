@@ -23,7 +23,6 @@ import time
 # 导入我们的组件
 from data.connectors.api_connector import APIConnector, create_enhanced_api_connector
 from utils.data_transformers.time_series_builder import TimeSeriesBuilder, create_time_series_builder
-from utils.helpers.validation_utils import ValidationUtils, create_validation_utils, ValidationLevel
 from utils.helpers.date_utils import DateUtils, create_date_utils
 
 logger = logging.getLogger(__name__)
@@ -113,7 +112,6 @@ class SmartDataFetcher:
         # 初始化核心组件
         self.api_connector = create_enhanced_api_connector(config, claude_client, gpt_client)
         self.time_series_builder = create_time_series_builder(claude_client, gpt_client)
-        self.validator = create_validation_utils(claude_client, gpt_client)
         self.date_utils = create_date_utils(claude_client)
 
         # 配置参数
@@ -481,10 +479,7 @@ class SmartDataFetcher:
 
             execution_time = time.time() - start_time
 
-            # 🔍 验证API调用结果
-            if self.config.get('enable_data_validation', True):
-                validation_result = await self._validate_api_result(result, call_plan)
-                result['validation'] = validation_result
+
 
             # 添加执行元数据
             result['execution_metadata'] = {
@@ -1134,27 +1129,7 @@ class SmartDataFetcher:
 
         return validation_result
 
-    async def _validate_api_result(self, result: Dict[str, Any], call_plan: Any) -> Dict[str, Any]:
-        """验证API调用结果"""
 
-        if not self.validator:
-            return {'validation_performed': False, 'reason': 'no_validator'}
-
-        try:
-            # 使用validation_utils验证API响应
-            validation_result = await self.validator.validate_api_response(result)
-
-            return {
-                'validation_performed': True,
-                'is_valid': validation_result.is_valid,
-                'quality_score': validation_result.overall_score,
-                'issues_count': len(validation_result.issues),
-                'validation_details': validation_result
-            }
-
-        except Exception as e:
-            logger.warning(f"API结果验证失败: {str(e)}")
-            return {'validation_performed': False, 'error': str(e)}
 
     async def _execute_fallback_strategy(self, acquisition_plan: Any,
                                          failed_calls: List[Dict[str, Any]]) -> Dict[str, Any]:

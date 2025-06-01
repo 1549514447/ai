@@ -27,7 +27,6 @@ import hashlib
 
 # 导入我们刚写的工具类
 from utils.helpers.date_utils import DateUtils, create_date_utils
-from utils.helpers.validation_utils import ValidationUtils, create_validation_utils, ValidationLevel
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +85,6 @@ class APIConnector:
         self.claude_client = claude_client
         self.gpt_client = gpt_client
         self.date_utils = create_date_utils(claude_client)
-        self.validator = create_validation_utils(claude_client, gpt_client)
 
         # 🆕 智能查询统计
         self.query_stats = {
@@ -110,9 +108,9 @@ class APIConnector:
             'cache_ttl': 300,
             'circuit_breaker_threshold': 5,
             'circuit_breaker_timeout': 60,
-            # 🆕 AI增强配置
-            'enable_ai_validation': True,
-            'enable_smart_caching': True,
+            # 🆕 直接禁用AI验证
+            'enable_ai_validation': False,  # 改为 False
+            'enable_smart_caching': False,
             'data_quality_threshold': 0.8
         }
 
@@ -129,7 +127,7 @@ class APIConnector:
                         raise RuntimeError("Event loop is closed")
                 except RuntimeError:
                     raise RuntimeError("No running event loop")
-                    
+
                 timeout = aiohttp.ClientTimeout(total=self.config.get('timeout', 30))
                 self.session = aiohttp.ClientSession(timeout=timeout)
             return self.session
@@ -177,8 +175,7 @@ class APIConnector:
     async def _make_request(self, endpoint: str, params: Dict = None,
                             use_cache: bool = True, enable_ai_validation: bool = True) -> Dict[str, Any]:
         """
-        🚀 增强版HTTP请求方法
-        新增AI验证和智能缓存
+        🚀 增强版HTTP请求方法 - 修复事件循环关闭问题
         """
         self.query_stats['total_queries'] += 1
 
@@ -205,106 +202,151 @@ class APIConnector:
 
         url = f"{self.base_url}{endpoint}"
 
-        # 并发控制
-        async with self.semaphore:
+        # 🔧 修复：改进事件循环检查和重建
+        max_retries = self.config.get('max_retries', 3)
+        retry_delay = self.config.get('retry_delay', 1.0)
+
+        for attempt in range(max_retries + 1):
             try:
-                session = await self._get_session()
-            except RuntimeError as e:
-                if "Event loop is closed" in str(e):
-                    logger.error(f"Cannot make request to {endpoint}: Event loop is closed")
-                    return {
-                        "success": False,
-                        "message": "Cannot process request: Event loop is closed"
-                    }
-                raise
+                # 🔧 修复：每次尝试前检查和重建session
+                session = await self._get_or_create_session()
 
-            # 重试机制
-            max_retries = self.config.get('max_retries', 3)
-            retry_delay = self.config.get('retry_delay', 1.0)
+                logger.info(f"Making request to {endpoint} (attempt {attempt + 1})")
 
-            for attempt in range(max_retries + 1):
-                try:
-                    logger.info(f"Making request to {endpoint} (attempt {attempt + 1})")
+                async with session.get(url, params=request_params) as response:
+                    if response.status == 200:
+                        data = await response.json()
 
-                    async with session.get(url, params=request_params) as response:
-                        if response.status == 200:
-                            data = await response.json()
+                        # 验证响应格式
+                        if isinstance(data, dict) and 'result' in data:
+                            result = {
+                                "success": data.get('result', False),
+                                "data": data.get('data'),
+                                "status": data.get('status', 0),
+                                "endpoint": endpoint,
+                                "request_params": request_params,
+                                "timestamp": datetime.now().isoformat()
+                            }
 
-                            # 验证响应格式
-                            if isinstance(data, dict) and 'result' in data:
-                                result = {
-                                    "success": data.get('result', False),
-                                    "data": data.get('data'),
-                                    "status": data.get('status', 0),
-                                    "endpoint": endpoint,
-                                    "request_params": request_params,
-                                    "timestamp": datetime.now().isoformat()
-                                }
-
-                                if not result["success"]:
-                                    result["message"] = f"API returned error: status={data.get('status', 'unknown')}"
-                                else:
-                                    # 🆕 AI数据验证
-                                    if enable_ai_validation and self.config.get('enable_ai_validation', True):
-                                        validation_result = await self._ai_validate_response(result, endpoint)
-                                        result["validation"] = validation_result
-
-                                        if not validation_result.get("is_valid", True):
-                                            self.query_stats['validation_failures'] += 1
-                                            logger.warning(f"Data validation failed for {endpoint}")
-                            else:
-                                result = {
-                                    "success": False,
-                                    "message": "Invalid API response format"
-                                }
-
-                            # 更新熔断器（成功）
-                            self._update_circuit_breaker(True)
-
-                            # 🆕 智能缓存
-                            if result["success"] and use_cache:
-                                await self._smart_cache_store(cache_key, result, endpoint)
-
-                            return result
+                            if not result["success"]:
+                                result["message"] = f"API returned error: status={data.get('status', 'unknown')}"
 
                         else:
-                            raise aiohttp.ClientError(f"HTTP {response.status}")
+                            result = {
+                                "success": False,
+                                "message": "Invalid API response format"
+                            }
 
-                except asyncio.CancelledError:
-                    logger.warning(f"Request to {endpoint} was cancelled")
+                        # 更新熔断器（成功）
+                        self._update_circuit_breaker(True)
+
+                        # 🆕 智能缓存
+                        if result["success"] and use_cache:
+                            await self._smart_cache_store(cache_key, result, endpoint)
+
+                        return result
+
+                    else:
+                        raise aiohttp.ClientError(f"HTTP {response.status}")
+
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                    logger.warning(f"Event loop issue detected, attempting to recreate session (attempt {attempt + 1})")
+                    # 🔧 修复：强制重新创建session
+                    await self._force_recreate_session()
+                    if attempt < max_retries:
+                        continue
+                    else:
+                        logger.error(f"Cannot recover from event loop issue after {max_retries + 1} attempts")
+                        return {
+                            "success": False,
+                            "message": "Event loop recovery failed"
+                        }
+                else:
+                    logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
+            except asyncio.CancelledError:
+                logger.warning(f"Request to {endpoint} was cancelled")
+                return {
+                    "success": False,
+                    "message": "Request cancelled"
+                }
+            except Exception as e:
+                logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
+
+                # 最后一次尝试失败
+                if attempt == max_retries:
+                    self._update_circuit_breaker(False)
                     return {
                         "success": False,
-                        "message": "Request cancelled"
+                        "message": f"API request failed after {max_retries + 1} attempts: {str(e)}"
                     }
-                except RuntimeError as e:
-                    if "Event loop is closed" in str(e):
-                        logger.error(f"Cannot continue request to {endpoint}: Event loop is closed")
-                        return {
-                            "success": False,
-                            "message": "Cannot process request: Event loop is closed"
-                        }
-                    logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
-                except Exception as e:
-                    logger.warning(f"Request attempt {attempt + 1} failed: {str(e)}")
 
-                    # 最后一次尝试失败
-                    if attempt == max_retries:
-                        self._update_circuit_breaker(False)
-                        return {
-                            "success": False,
-                            "message": f"API request failed after {max_retries + 1} attempts: {str(e)}"
-                        }
+            # 等待后重试
+            try:
+                await asyncio.sleep(retry_delay * (2 ** attempt))
+            except asyncio.CancelledError:
+                logger.warning(f"Sleep before retry was cancelled for {endpoint}")
+                return {
+                    "success": False,
+                    "message": "Request retry cancelled"
+                }
 
-                    # 等待后重试
-                    try:
-                        await asyncio.sleep(retry_delay * (2 ** attempt))
-                    except asyncio.CancelledError:
-                        logger.warning(f"Sleep before retry was cancelled for {endpoint}")
-                        return {
-                            "success": False,
-                            "message": "Request retry cancelled"
-                        }
+    async def _get_or_create_session(self):
+        """改进的session获取方法 - 处理事件循环问题"""
+        try:
+            # 检查当前session状态
+            if self.session is None or self.session.closed:
+                return await self._create_new_session()
 
+            # 检查事件循环状态
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_closed():
+                    logger.warning("Event loop is closed, recreating session")
+                    return await self._create_new_session()
+            except RuntimeError:
+                logger.warning("No running event loop, creating new session")
+                return await self._create_new_session()
+
+            return self.session
+
+        except Exception as e:
+            logger.error(f"Session management error: {str(e)}")
+            return await self._create_new_session()
+
+    async def _create_new_session(self):
+        """创建新的session"""
+        try:
+            # 如果旧session存在且未关闭，先关闭它
+            if self.session and not self.session.closed:
+                await self.session.close()
+
+            # 创建新session
+            timeout = aiohttp.ClientTimeout(total=self.config.get('timeout', 30))
+            self.session = aiohttp.ClientSession(timeout=timeout)
+
+            logger.info("Created new aiohttp session")
+            return self.session
+
+        except Exception as e:
+            logger.error(f"Failed to create new session: {str(e)}")
+            raise
+
+    async def _force_recreate_session(self):
+        """强制重新创建session"""
+        try:
+            if self.session:
+                try:
+                    await self.session.close()
+                except:
+                    pass  # 忽略关闭时的错误
+
+            self.session = None
+            return await self._create_new_session()
+
+        except Exception as e:
+            logger.error(f"Force recreate session failed: {str(e)}")
+            raise
     # ============= 🆕 新增第8个API方法 =============
 
     async def intelligent_data_fetch_enhanced(self, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
@@ -625,36 +667,7 @@ class APIConnector:
             }
         }
 
-    # ============= 🆕 AI数据验证和智能缓存 =============
 
-    async def _ai_validate_response(self, response: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
-        """AI验证API响应"""
-
-        if not self.validator:
-            return {"is_valid": True, "confidence": 0.5, "method": "no_validator"}
-
-        try:
-            # 根据endpoint确定验证级别
-            validation_level = ValidationLevel.STANDARD
-            if "product_end" in endpoint or "system" in endpoint:
-                validation_level = ValidationLevel.AI_ENHANCED
-
-            validation_result = await self.validator.validate_api_response(
-                response,
-                expected_fields=self._get_expected_fields(endpoint)
-            )
-
-            return {
-                "is_valid": validation_result.is_valid,
-                "confidence": validation_result.overall_score,
-                "issues_count": len(validation_result.issues),
-                "validation_level": validation_level.value,
-                "method": "ai_enhanced"
-            }
-
-        except Exception as e:
-            logger.error(f"AI验证失败: {str(e)}")
-            return {"is_valid": True, "confidence": 0.3, "error": str(e)}
 
     async def _smart_cache_lookup(self, cache_key: str, endpoint: str) -> Optional[Dict[str, Any]]:
         """智能缓存查找"""
@@ -1198,7 +1211,6 @@ class APIConnector:
                 "claude_available": self.claude_client is not None,
                 "gpt_available": self.gpt_client is not None,
                 "date_utils_available": self.date_utils is not None,
-                "validator_available": self.validator is not None
             }
         }
 
@@ -1215,7 +1227,6 @@ class APIConnector:
                 "ai_capabilities": {
                     "claude_ready": self.claude_client is not None,
                     "gpt_ready": self.gpt_client is not None,
-                    "validation_ready": self.validator is not None
                 },
                 "performance_stats": self.query_stats,
                 "timestamp": datetime.now().isoformat()
